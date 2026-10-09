@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .package import build_package, read_package, redact_conversations
 from .store import Store, StoreConflict
 from .revisions import build_revision, compare_packages
+from .contributions import Contributions
 from . import __version__
 
 MAX_BODY = 101 * 1024 * 1024
@@ -35,6 +36,7 @@ def create_server(data_dir, host='127.0.0.1', port=8765, mode='hub', token=None,
     server.daemon_threads = True
     server.mode = mode
     server.store = Store(data_dir) if mode == 'hub' else None
+    server.contributions = Contributions(server.store) if server.store else None
     server.connector_token = token or secrets.token_urlsafe(32)
     server.codex_command = codex_command
     server.codex_lock = threading.Lock()
@@ -44,7 +46,7 @@ def create_server(data_dir, host='127.0.0.1', port=8765, mode='hub', token=None,
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'ContextHub/0.1'
+    server_version = f'ContextHub/{__version__}'
 
     def log_message(self, fmt, *args):
         # Keep credentials, URL parameters and conversation bodies out of logs.
@@ -169,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {'error': f'操作未完成（{type(exc).__name__}），请查看终端诊断或稍后重试'})
 
     def _static(self, path):
-        allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/style.css': 'style.css'}
+        allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/contributions.js': 'contributions.js', '/style.css': 'style.css'}
         if path not in allowed:
             raise HTTPError(404, '未找到页面')
         file = STATIC / allowed[path]
@@ -177,6 +179,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _hub(self, method, path, query):
         store = self.server.store
+        if path.startswith('/api/contributions/'):
+            return self._contributions(method, path, query)
         if path == '/api/session' and method == 'GET':
             return self._send(200, self._session())
         if path in ('/api/register', '/api/login') and method == 'POST':
@@ -221,6 +225,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {'deleted': True})
             if len(parts) == 4:
                 action = parts[3]
+                if action == 'contributions':
+                    if method == 'GET':
+                        return self._send(200, {'contributions': self.server.contributions.list(ident, user_id)})
+                    if method == 'POST':
+                        data = self._json(65536)
+                        return self._send(201, self.server.contributions.create(
+                            ident, session['user'], data.get('source_version_id'),
+                            data.get('title'), data.get('description', '')))
                 if method == 'GET' and action == 'versions':
                     return self._send(200, {'versions': store.versions(ident, user_id)})
                 if method == 'GET' and action == 'compare':
@@ -259,6 +271,40 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(200, {'comparison': compare_packages(base, candidate), 'compatibility': candidate['compatibility']})
                     return self._send(201, store.add_version(ident, session['user'], blob, base_id, message.strip()))
         raise HTTPError(404, '未找到此接口')
+
+    def _contributions(self, method, path, query):
+        parts = path.strip('/').split('/')
+        if len(parts) not in (3, 4) or parts[:2] != ['api', 'contributions']:
+            raise HTTPError(404, '未找到贡献请求接口')
+        mutating = method == 'POST'
+        session = self._session(required=mutating, mutate=mutating)
+        user = session['user']
+        user_id = (user or {}).get('id')
+        service = self.server.contributions
+        ident = parts[2]
+        if len(parts) == 3 and method == 'GET':
+            return self._send(200, service.detail(ident, user_id))
+        if len(parts) == 4:
+            action = parts[3]
+            if method == 'GET' and action == 'candidate':
+                blob = service.candidate(ident, user_id, query.get('check_id', [None])[0])
+                return self._send(200, blob, 'application/zip', {'Content-Disposition': 'attachment; filename="merge-candidate.contextpack"'})
+            if method == 'POST':
+                data = self._json(65536)
+                if action == 'comments':
+                    result = service.comment(ident, user, data.get('body'))
+                elif action == 'status':
+                    result = service.set_status(ident, user, data.get('status'))
+                elif action == 'source':
+                    result = service.update_source(ident, user, data.get('source_version_id'))
+                elif action == 'check':
+                    result = service.check(ident, user, data.get('expected_target_version_id'))
+                elif action == 'merge':
+                    result = service.merge(ident, user, data.get('check_id'), data.get('candidate_oid'))
+                else:
+                    raise HTTPError(404, '未找到贡献请求接口')
+                return self._send(200, result)
+        raise HTTPError(404, '未找到贡献请求接口')
 
     def _local(self, method, path, query):
         if self.server.mode != 'connector':

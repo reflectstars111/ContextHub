@@ -147,7 +147,7 @@ class Store:
         return subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '--git-dir', str(repo), *args],
                               input=data, capture_output=True, check=True, env=env).stdout.decode().strip()
 
-    def _git_snapshot(self, ident, package, parent=None, message='初始版本'):
+    def _git_snapshot(self, ident, package, parent=None, message='初始版本', second_parent=None):
         """Write immutable objects only; refs follow committed database state."""
         repo = self.root / 'public.git'
         if not repo.exists():
@@ -160,6 +160,10 @@ class Store:
             tree.append(f'100644 blob {oid}\t{name}\n')
         tree_id = self._git('mktree', data=''.join(tree).encode())
         parents = ['-p', parent] if parent else []
+        if second_parent:
+            if not parent:
+                raise ValueError('A merge snapshot requires both parent commits')
+            parents.extend(['-p', second_parent])
         return self._git('commit-tree', tree_id, *parents, data=f'{message}\n\nContextHub library {ident}\n'.encode())
 
     def _sync_git_ref(self, ident):

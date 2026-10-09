@@ -49,6 +49,7 @@ function draftChanged() {
 function renderVersionWorkspace(data) {
   const hub = data.kind === "hub" || data.kind === "draft";
   $("version-workspace").hidden = !hub;
+  renderPackageContributions(data);
   if (!hub) return;
   const draft = isDraft();
   const version = data.version || {};
@@ -367,9 +368,10 @@ function bindVersionEvents() {
   window.addEventListener("popstate", () => perform(async () => {
     if (state.mode !== "hub") return;
     const current = state.reader;
-    if (!requireSavedEditor() || !leaveDraft()) { if (current && current.id) updateVersionURL(current); return; }
+    if (!requireSavedEditor() || !leaveDraft()) { if (current && current.id) updateVersionURL(current); else if (contributionState.current && state.view === "contribution") updateContributionURL(contributionState.current.id); return; }
     const parameters = new URLSearchParams(window.location.search);
-    if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
+    if (parameters.has("contribution")) await loadContribution(parameters.get("contribution"));
+    else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
     else navigate("library");
   }));
 }

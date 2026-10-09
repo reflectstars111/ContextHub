@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "contexthub-conversations"
-version = "0.2.0"
+version = "0.3.0"
 description = "Portable AI conversations and a local Codex connector"
 requires-python = ">=3.12"
 dependencies = []

@@ -1,5 +1,7 @@
 # ContextHub：Git for AI Agents 产品构想
 
+> 历史构想：当前产品已明确为 **GitHub for AI Conversations**，以对话库保存、导入导出、分享、Fork 和版本协作为核心。最新实现为 0.3.0，见 [README](README.md)、[当前产品设计](docs/superpowers/specs/2026-10-08-contexthub-conversations-design.md)及[贡献协作验收](docs/verification/2026-10-09-contributions.md)。下文保留早期讨论，不代表当前开发范围。
+
 ## 1. 项目愿景
 
 随着 Large Language Model（LLM）与 Harness 结合形成 Agent，AI

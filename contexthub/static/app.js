@@ -143,13 +143,16 @@ function empty(container, title, description, buttonText, handler) {
 }
 function navigate(view) {
   if (state.view === "reader" && view !== "reader" && (!requireSavedEditor() || !leaveDraft())) return false;
-  if (view !== "reader" && state.view === "reader") clearVersionURL();
+  rememberContributionComment();
+  if (view !== "contribution") invalidateContributionReads();
+  if (view !== "reader") { contributionState.listRequest++; state.readerRequest++; }
+  if (!["reader", "contribution"].includes(view) && ["reader", "contribution"].includes(state.view)) clearVersionURL();
   state.view = view;
-  for (const name of ["library", "local", "import", "reader", "loading"]) $(`${name}-view`).hidden = name !== view;
-  const labels = { library: "对话库", local: "本地会话", import: "导入对话", reader: "阅读对话", loading: "连接中" };
+  for (const name of ["library", "local", "import", "reader", "contribution", "loading"]) $(`${name}-view`).hidden = name !== view;
+  const labels = { library: "对话库", local: "本地会话", import: "导入对话", reader: "阅读对话", contribution: "贡献请求", loading: "连接中" };
   $("breadcrumb").textContent = labels[view];
   document.querySelectorAll(".nav-item").forEach((button) => {
-    const active = button.dataset.view === view || (view === "reader" && button.dataset.view === (state.mode === "connector" ? "local" : "library"));
+    const active = button.dataset.view === view || (["reader", "contribution"].includes(view) && button.dataset.view === (state.mode === "connector" ? "local" : "library"));
     button.classList.toggle("active", active);
     if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
   });
@@ -175,7 +178,8 @@ function updateAccount(session) {
   state.csrf = session.csrf_token || null;
   $("account-name").textContent = state.user ? state.user.username : "";
   $("account-button").textContent = state.user ? "退出登录" : "登录 / 注册";
-  if (state.reader && state.reader.kind === "hub") renderVersionWorkspace(state.reader);
+  if (state.view === "reader" && state.reader && state.reader.kind === "hub") renderVersionWorkspace(state.reader);
+  if (state.view === "contribution" && contributionState.current) perform(() => loadContribution(contributionState.current.id));
 }
 async function loadPackages() {
   const request = ++state.packageRequest;
@@ -210,6 +214,8 @@ async function loadPackages() {
 }
 async function loadPackage(id, version = null) {
   if (!requireSavedEditor() || !leaveDraft()) return;
+  rememberContributionComment();
+  invalidateContributionReads();
   const request = ++state.readerRequest;
   clearStatus();
   const pack = await api(`/api/packages/${encodeURIComponent(id)}${version ? `?version=${encodeURIComponent(version)}` : ""}`);
@@ -218,7 +224,9 @@ async function loadPackage(id, version = null) {
   openReader({ ...pack, id: pack.id || id, kind: "hub" });
 }
 function openReader(data) {
-  // Any reader transition supersedes earlier asynchronous package reads.
+  // Any reader transition supersedes earlier asynchronous package and proposal reads.
+  rememberContributionComment();
+  invalidateContributionReads();
   state.readerRequest++;
   state.reader = data;
   state.conversationIndex = 0;
@@ -433,7 +441,8 @@ async function submitAuth(event) {
       if (next === "upload") openUpload();
       else if (!state.reader) {
         const parameters = new URLSearchParams(window.location.search);
-        if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
+        if (parameters.has("contribution")) await loadContribution(parameters.get("contribution"));
+        else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
       }
     });
   } catch (error) { inlineError("auth-error", error); }
@@ -644,6 +653,7 @@ function renderReceipt(data) {
 }
 function bindEvents() {
   bindVersionEvents();
+  bindContributionEvents();
   document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => $(button.dataset.close).close()));
   $("account-button").addEventListener("click", () => perform(accountAction));
   $("open-upload").addEventListener("click", openUpload);
@@ -704,7 +714,8 @@ async function initialize() {
       const parameters = new URLSearchParams(window.location.search);
       navigate("library");
       await loadPackages();
-      if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
+      if (parameters.has("contribution")) await loadContribution(parameters.get("contribution"));
+      else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
     }
   } catch (error) {
     showStatus(errorMessage(error), "error");
