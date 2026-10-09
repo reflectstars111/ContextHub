@@ -6,7 +6,7 @@
 
 ## 2026-10-09 实现进展
 
-已提供可运行的 Codex 迁移 MVP：本地连接器批量导出 `.contextpack`，Hub 预览、上传、公开或私有分享、阅读和下载，接收端创建新的 Codex 上下文会话。实现使用 Python 3.12 标准库、SQLite 和 Git，产品运行不依赖第三方 Python 包；启动与操作说明以 [README](../../README.md) 为准。公开上传创建内部 Git 快照；版本浏览、Diff、Fork、贡献请求及其他平台适配仍是后续工作。
+已提供可运行的 Codex 迁移 MVP：本地连接器批量导出 `.contextpack`，Hub 预览、上传、公开或私有分享、阅读和下载，接收端创建新的 Codex 上下文会话。实现使用 Python 3.12 标准库、SQLite 和 Git，产品运行不依赖第三方 Python 包；启动与操作说明以 [README](../../README.md) 为准。后续 0.2.0 已增加版本浏览、Diff、固定版本 Fork 和网页编辑，见[版本管理验收](../verification/2026-10-09-versions.md)；贡献请求及其他平台适配仍是后续工作。以下 Codex 兼容性证据保持原验证范围。
 
 已使用 `codex-cli 0.153.4`、两个隔离临时存储和本地确定性模拟服务完成迁移实测。原始结果记录于本次工作环境的 `/tmp/contexthub-codex-verification.json`，复现脚本为 [`scripts/verify_codex_transfer.py`](../../scripts/verify_codex_transfer.py)，证据汇总见[迁移验证记录](../verification/2026-10-09-transfer.md)。
 

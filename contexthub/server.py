@@ -12,7 +12,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .package import build_package, read_package, redact_conversations
-from .store import Store
+from .store import Store, StoreConflict
+from .revisions import build_revision, compare_packages
+from . import __version__
 
 MAX_BODY = 101 * 1024 * 1024
 STATIC = Path(__file__).parent / 'static'
@@ -138,7 +140,7 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(urlsplit(self.path).path)
             query = parse_qs(urlsplit(self.path).query)
             if path == '/api/config' and method == 'GET':
-                return self._send(200, {'mode': self.server.mode, 'version': '0.1.0', 'max_package_bytes': MAX_BODY})
+                return self._send(200, {'mode': self.server.mode, 'version': __version__, 'max_package_bytes': MAX_BODY})
             if path.startswith('/api/local/'):
                 return self._local(method, path, query)
             if path.startswith('/api/'):
@@ -154,6 +156,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {'error': str(exc)})
         except PermissionError as exc:
             self._send(403, {'error': str(exc)})
+        except StoreConflict as exc:
+            self._send(409, {'error': str(exc)})
         except (ValueError, TypeError, KeyError) as exc:
             self._send(422, {'error': str(exc)[:500]})
         except (BrokenPipeError, ConnectionResetError):
@@ -165,7 +169,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {'error': f'操作未完成（{type(exc).__name__}），请查看终端诊断或稍后重试'})
 
     def _static(self, path):
-        allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}
+        allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/style.css': 'style.css'}
         if path not in allowed:
             raise HTTPError(404, '未找到页面')
         file = STATIC / allowed[path]
@@ -205,15 +209,55 @@ class Handler(BaseHTTPRequestHandler):
         parts = path.strip('/').split('/')
         if len(parts) in (3, 4) and parts[:2] == ['api', 'packages']:
             ident = parts[2]
-            session = self._session(required=method == 'DELETE', mutate=method == 'DELETE')
+            mutating = method in ('POST', 'DELETE')
+            session = self._session(required=mutating, mutate=mutating)
             user_id = (session['user'] or {}).get('id')
             if len(parts) == 4 and parts[3] == 'download' and method == 'GET':
-                return self._send(200, store.download(ident, user_id), 'application/zip', {'Content-Disposition': f'attachment; filename="{ident}.contextpack"'})
+                return self._send(200, store.download(ident, user_id, version_id=query.get('version', [None])[0]), 'application/zip', {'Content-Disposition': f'attachment; filename="{ident}.contextpack"'})
             if len(parts) == 3 and method == 'GET':
-                return self._send(200, store.detail(ident, user_id))
+                return self._send(200, store.detail(ident, user_id, version_id=query.get('version', [None])[0]))
             if len(parts) == 3 and method == 'DELETE':
                 store.delete(ident, user_id)
                 return self._send(200, {'deleted': True})
+            if len(parts) == 4:
+                action = parts[3]
+                if method == 'GET' and action == 'versions':
+                    return self._send(200, {'versions': store.versions(ident, user_id)})
+                if method == 'GET' and action == 'compare':
+                    # Authorize each operand separately, even if IDs are guessed.
+                    store.get(ident, user_id)
+                    old_id = query.get('from', [''])[0]
+                    new_id = query.get('to', [''])[0]
+                    if not old_id or not new_id:
+                        raise ValueError('请选择两个明确的版本')
+                    before = read_package(store.download(ident, user_id, version_id=old_id))
+                    after = read_package(store.download(ident, user_id, version_id=new_id))
+                    return self._send(200, compare_packages(before, after))
+                if method == 'POST' and action == 'fork':
+                    store.get(ident, user_id)
+                    data = self._json(4096)
+                    version_id = data.get('version_id')
+                    if not isinstance(version_id, str) or not version_id:
+                        raise ValueError('请选择要 Fork 的固定版本')
+                    return self._send(201, store.fork_package(ident, session['user'], version_id, data.get('visibility', 'private')))
+                if method == 'POST' and action in ('versions', 'preview'):
+                    current = store.get(ident, user_id)
+                    if current['owner_id'] != user_id:
+                        raise FileNotFoundError('对话库不存在或无权修改')
+                    data = self._json()
+                    base_id, message = data.get('base_version'), data.get('message')
+                    if not isinstance(base_id, str) or not base_id:
+                        raise ValueError('缺少编辑的基准版本，请重新打开对话库')
+                    if not isinstance(message, str) or not 1 <= len(message.strip()) <= 2000:
+                        raise ValueError('保存说明需为 1–2,000 个字符')
+                    if action == 'preview' and base_id != current['head_version_id']:
+                        raise StoreConflict('对话库已有新版本，请保留草稿并重新检查最新版本')
+                    base = read_package(store.download(ident, user_id, version_id=base_id))
+                    blob = build_revision(base, data)
+                    if action == 'preview':
+                        candidate = read_package(blob)
+                        return self._send(200, {'comparison': compare_packages(base, candidate), 'compatibility': candidate['compatibility']})
+                    return self._send(201, store.add_version(ident, session['user'], blob, base_id, message.strip()))
         raise HTTPError(404, '未找到此接口')
 
     def _local(self, method, path, query):

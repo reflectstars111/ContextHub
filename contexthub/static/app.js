@@ -5,7 +5,7 @@ const state = {
   mode: null, user: null, csrf: null, token: "", view: "library", authMode: "login",
   packages: [], sessions: [], selected: new Set(), reader: null, conversationIndex: 0,
   inspectedFile: null, inspection: null, uploadInspectedFile: null,
-  packageRequest: 0, sessionRequest: 0, uploadInspection: 0,
+  packageRequest: 0, sessionRequest: 0, uploadInspection: 0, readerRequest: 0,
 };
 
 function node(tag, className, text) {
@@ -55,7 +55,9 @@ async function api(path, options = {}, binary = false) {
   if (!response.ok) {
     let message = `请求失败（${response.status}）`;
     try { const body = await response.json(); message = body.error || message; } catch (_) { /* Preserve the HTTP status. */ }
-    throw new Error(String(message));
+    const error = new Error(String(message));
+    error.status = response.status;
+    throw error;
   }
   if (binary) return response.blob();
   if (response.status === 204) return {};
@@ -140,7 +142,8 @@ function empty(container, title, description, buttonText, handler) {
   container.append(box);
 }
 function navigate(view) {
-  if (state.view === "reader" && view !== "reader" && !requireSavedEditor()) return;
+  if (state.view === "reader" && view !== "reader" && (!requireSavedEditor() || !leaveDraft())) return false;
+  if (view !== "reader" && state.view === "reader") clearVersionURL();
   state.view = view;
   for (const name of ["library", "local", "import", "reader", "loading"]) $(`${name}-view`).hidden = name !== view;
   const labels = { library: "对话库", local: "本地会话", import: "导入对话", reader: "阅读对话", loading: "连接中" };
@@ -151,6 +154,7 @@ function navigate(view) {
     if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
   });
   window.scrollTo({ top: 0, behavior: "instant" });
+  return true;
 }
 function configureNavigation() {
   const nav = $("nav-list");
@@ -171,6 +175,7 @@ function updateAccount(session) {
   state.csrf = session.csrf_token || null;
   $("account-name").textContent = state.user ? state.user.username : "";
   $("account-button").textContent = state.user ? "退出登录" : "登录 / 注册";
+  if (state.reader && state.reader.kind === "hub") renderVersionWorkspace(state.reader);
 }
 async function loadPackages() {
   const request = ++state.packageRequest;
@@ -197,18 +202,24 @@ async function loadPackages() {
       const author = node("span", "card-author");
       const username = typeof pack.author === "object" ? pack.author.username : pack.author;
       author.append(node("span", "author-avatar", (username || "?").slice(0, 1).toUpperCase()), node("span", "", username || "未知作者"));
-      footer.append(author, node("span", "", `${pack.conversation_count ?? "—"} 段对话 · ${formatDate(pack.created_at)}`));
+      footer.append(author, node("span", "", `${pack.conversation_count ?? "—"} 段对话${pack.version_count ? ` · ${pack.version_count} 个版本` : ""} · ${formatDate(pack.created_at)}`));
       card.append(top, heading, node("p", "card-description", pack.description || "这个对话包还没有描述。"), footer);
       grid.append(card);
     }
   } finally { if (request === state.packageRequest) $("package-grid").removeAttribute("aria-busy"); }
 }
-async function loadPackage(id) {
+async function loadPackage(id, version = null) {
+  if (!requireSavedEditor() || !leaveDraft()) return;
+  const request = ++state.readerRequest;
   clearStatus();
-  const pack = await api(`/api/packages/${encodeURIComponent(id)}`);
+  const pack = await api(`/api/packages/${encodeURIComponent(id)}${version ? `?version=${encodeURIComponent(version)}` : ""}`);
+  if (request !== state.readerRequest) return;
+  if (isDraft() && (!requireSavedEditor() || !leaveDraft())) return;
   openReader({ ...pack, id: pack.id || id, kind: "hub" });
 }
 function openReader(data) {
+  // Any reader transition supersedes earlier asynchronous package reads.
+  state.readerRequest++;
   state.reader = data;
   state.conversationIndex = 0;
   const editable = data.kind === "local";
@@ -217,6 +228,7 @@ function openReader(data) {
   $("reader-eyebrow").textContent = editable ? "REVIEW BEFORE EXPORT" : "CONVERSATION PACKAGE";
   $("reader-back").textContent = editable ? "← 返回本地会话" : "← 返回对话库";
   $("download-package").textContent = editable ? "导出 .contextpack" : "下载完整对话包";
+  $("download-package").disabled = false;
   $("export-options").hidden = !editable;
   $("export-title").value = data.title || ((data.conversations || []).length === 1 ? data.conversations[0].title || "Codex 对话" : "Codex 对话合集");
   $("export-description").value = data.description || "";
@@ -231,6 +243,7 @@ function openReader(data) {
   renderWarnings($("reader-warnings"), data);
   renderConversationTabs();
   renderConversation();
+  renderVersionWorkspace(data);
   navigate("reader");
 }
 function renderConversationTabs() {
@@ -256,6 +269,7 @@ function renderConversation() {
   const conversation = currentConversation();
   const messages = $("messages");
   messages.replaceChildren();
+  document.querySelectorAll(".new-message-actions").forEach((item) => item.remove());
   $("conversation-provenance").replaceChildren();
   $("conversation-title").textContent = conversation ? conversation.title || "未命名对话" : "没有可阅读的对话";
   $("copy-conversation").disabled = !conversation;
@@ -264,7 +278,7 @@ function renderConversation() {
   const provenance = node("details", "provenance");
   provenance.append(node("summary", "", "来源、上下文与编辑记录"), node("pre", "", JSON.stringify(provenanceRecord(conversation), null, 2)), action("复制来源记录", "text-button", () => perform(async () => { await copyText(JSON.stringify(provenanceRecord(conversation), null, 2)); showStatus("来源记录已复制。"); })));
   $("conversation-provenance").append(provenance);
-  const editable = state.reader.kind === "local";
+  const editable = state.reader.kind === "local" || isDraft();
   (conversation.messages || []).forEach((message, index) => {
     const section = node("section", `message ${message.role === "assistant" ? "assistant" : "user"}`);
     const header = node("div", "message-heading");
@@ -276,13 +290,20 @@ function renderConversation() {
     if (editable) {
       const controls = node("div", "message-actions");
       controls.append(action("编辑", "text-button", () => editMessage(section, content, conversation, message, controls)), action("移除", "text-button danger", () => {
-        if (!window.confirm("从本次导出中移除这条消息？本地原始会话不受影响。")) return;
+        if (!requireSavedEditor()) return;
+        if (!window.confirm(isDraft() ? "从当前草稿中移除这条消息？已保存的版本不会改变。" : "从本次导出中移除这条消息？本地原始会话不受影响。")) return;
         conversation.messages.splice(index, 1);
         if (!Array.isArray(conversation.annotations)) conversation.annotations = [];
         conversation.annotations.push({ kind: "human_edited", text: `message_removed at ${new Date().toISOString()}`, message_id: message.id });
-        renderConversationTabs(); renderConversation();
-        showStatus("消息已从导出副本中移除，编辑记录已保留。");
+        draftChanged(); renderConversationTabs(); renderConversation();
+        showStatus(isDraft() ? "消息已从草稿中移除，请预览并保存新版本。" : "消息已从导出副本中移除，编辑记录已保留。");
       }));
+      if (isDraft()) {
+        const up = action("上移", "text-button", () => moveDraftMessage(conversation, index, -1));
+        const down = action("下移", "text-button", () => moveDraftMessage(conversation, index, 1));
+        up.disabled = index === 0; down.disabled = index === conversation.messages.length - 1;
+        controls.append(up, down);
+      }
       header.append(controls);
     }
     section.append(header, content);
@@ -294,6 +315,7 @@ function renderConversation() {
     messages.append(section);
   });
   if (!(conversation.messages || []).length) empty(messages, "没有可显示的消息", "请查看兼容性说明；如果消息被移除，可以返回列表重新预览原始会话。");
+  renderDraftConversation(conversation);
 }
 function requireSavedEditor() {
   const editor = $("messages").querySelector("textarea");
@@ -309,7 +331,7 @@ function editMessage(section, content, conversation, message, controls) {
   const textarea = node("textarea", "message-editor");
   textarea.value = message.content || "";
   textarea.setAttribute("aria-label", `编辑${roleLabel(message.role)}的消息`);
-  const footer = node("div", "editor-help", "保存后将标记为人工编辑。原始 Codex 会话不会改变。");
+  const footer = node("div", "editor-help", isDraft() ? "修改暂存于页面草稿。预览并保存新版本后，其他人才能看到。" : "保存后将标记为人工编辑。原始 Codex 会话不会改变。");
   const buttons = node("div", "message-actions");
   buttons.append(action("保存修改", "button button-small", () => {
     if (message.content !== textarea.value) {
@@ -318,7 +340,8 @@ function editMessage(section, content, conversation, message, controls) {
       if (!message.transformations.includes("human_edited")) message.transformations.push("human_edited");
       if (!Array.isArray(conversation.annotations)) conversation.annotations = [];
       conversation.annotations.push({ kind: "human_edited", text: `message_edited at ${new Date().toISOString()}`, message_id: message.id });
-      showStatus("修改已保存到导出副本，并保留人工编辑记录。");
+      draftChanged();
+      showStatus(isDraft() ? "修改已暂存到草稿，并保留人工编辑记录。" : "修改已保存到导出副本，并保留人工编辑记录。");
     }
     renderConversation();
   }), action("取消", "button button-small", renderConversation));
@@ -350,6 +373,7 @@ async function copyText(text) {
 }
 async function downloadCurrentPackage() {
   if (!state.reader) return;
+  if (isDraft()) throw new Error("请先预览并保存新版本，再下载完整对话包。");
   if ($( "messages").querySelector("textarea")) throw new Error("请先保存或取消正在编辑的消息，再导出。");
   await busy($("download-package"), "正在准备…", async () => {
     if (state.reader.kind === "local") {
@@ -360,8 +384,9 @@ async function downloadCurrentPackage() {
       saveBlob(blob, `${safeName(title)}.contextpack`);
       showStatus("对话包已生成并开始下载。自动脱敏无法覆盖所有敏感信息，请在分享前检查。");
     } else {
-      const blob = await api(`/api/packages/${encodeURIComponent(state.reader.id)}/download`, {}, true);
-      saveBlob(blob, `${safeName(state.reader.title)}.contextpack`);
+      const version = state.reader.version;
+      const blob = await api(`/api/packages/${encodeURIComponent(state.reader.id)}/download${version ? `?version=${encodeURIComponent(version.id)}` : ""}`, {}, true);
+      saveBlob(blob, `${safeName(state.reader.title)}${version ? `-v${version.number}` : ""}.contextpack`);
       showStatus("完整对话包已开始下载。");
     }
   });
@@ -406,11 +431,16 @@ async function submitAuth(event) {
       await loadPackages();
       showStatus(state.authMode === "register" ? "账户已创建。" : "已登录。");
       if (next === "upload") openUpload();
+      else if (!state.reader) {
+        const parameters = new URLSearchParams(window.location.search);
+        if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
+      }
     });
   } catch (error) { inlineError("auth-error", error); }
 }
 async function accountAction() {
   if (!state.user) { delete $("auth-dialog").dataset.next; setAuthMode("login"); $("auth-dialog").showModal(); return; }
+  if (!requireSavedEditor() || !leaveDraft()) return;
   await api("/api/logout", { method: "POST", json: {} });
   updateAccount({ user: null, csrf_token: null });
   state.reader = null;
@@ -470,12 +500,15 @@ async function submitUpload(event) {
   try {
     await busy($("upload-submit"), "上传中…", async () => {
       const visibility = new FormData($("upload-form")).get("visibility");
+      const previousReader = state.reader;
       const data = await api(`/api/packages?visibility=${encodeURIComponent(visibility)}`, { method: "POST", headers: { "Content-Type": "application/zip" }, body: file });
       $("upload-dialog").close(); $("upload-form").reset();
       state.uploadInspectedFile = null;
       $("upload-file-info").textContent = "尚未选择文件";
       $("upload-preview").replaceChildren(); $("upload-preview").hidden = true;
-      if (data.conversations) openReader({ ...data, kind: "hub" }); else await loadPackage(data.id);
+      if (state.reader === previousReader && !isDraft()) {
+        if (data.conversations) openReader({ ...data, kind: "hub" }); else await loadPackage(data.id);
+      }
       showStatus(visibility === "public" ? "已上传为公开对话包，任何访问此 Hub 的人均可阅读与下载。" : "已上传为私有对话包，仅你的账户可见。");
       await loadPackages();
     });
@@ -610,6 +643,7 @@ function renderReceipt(data) {
   container.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function bindEvents() {
+  bindVersionEvents();
   document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => $(button.dataset.close).close()));
   $("account-button").addEventListener("click", () => perform(accountAction));
   $("open-upload").addEventListener("click", openUpload);
@@ -667,8 +701,10 @@ async function initialize() {
       await loadSessions();
     } else {
       updateAccount(await api("/api/session"));
+      const parameters = new URLSearchParams(window.location.search);
       navigate("library");
       await loadPackages();
+      if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
     }
   } catch (error) {
     showStatus(errorMessage(error), "error");
