@@ -134,7 +134,7 @@ class NativeWindowsCommandTests(unittest.TestCase):
         self.command('codex', 'export', '--thread', 'fixture-source', '--title', '中文导出', '-o', exported)
         self.assertEqual(read_package(exported.read_bytes())['library']['title'], '中文导出')
         self.assertTrue(self.command('codex', 'import', exported, '--dry-run')['dry_run'])
-        receipt = self.command('codex', 'import', exported, '--cwd', self.root)
+        receipt = self.command('codex', 'import', exported, '--cwd', self.root, '--mode', 'context')
         self.assertTrue(receipt['results'][0]['injected'])
         methods = log.read_text(encoding='utf-8').splitlines()
         self.assertIn('thread/inject_items', methods)

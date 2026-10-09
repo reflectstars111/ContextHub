@@ -4,6 +4,7 @@ import subprocess
 import sys
 import unittest
 import threading
+from urllib.parse import urlencode
 from pathlib import Path
 from unittest.mock import patch
 
@@ -123,6 +124,49 @@ class ImportAPITests(unittest.TestCase):
                 self.assertIn('原文存档', response.read().decode())
                 client.assert_not_called()
                 connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_connector_modes_and_controlled_compatibility_errors(self):
+        from contexthub.codex import CodexError, TimelineError
+        blob = build_package([{'messages': [{'role': 'user', 'content': 'synthetic'}]}], 'Synthetic')
+        server = test_server.create_server(Path(self.tmp.name) / 'modes', port=0,
+                                           mode='connector', token='synthetic-token')
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def request(mode=None):
+            params = {'cwd': self.tmp.name}
+            if mode is not None:
+                params['mode'] = mode
+            connection = http.client.HTTPConnection(*server.server_address, timeout=10)
+            try:
+                connection.request('POST', '/api/local/import?' + urlencode(params), blob,
+                                   {'X-ContextHub-Token': 'synthetic-token'})
+                response = connection.getresponse()
+                return response.status, json.loads(response.read())
+            finally:
+                connection.close()
+
+        try:
+            with patch('contexthub.codex.CodexClient') as client, patch('contexthub.codex.import_conversation') as importer:
+                self.assertEqual(request('invalid')[0], 422)
+                client.assert_not_called()
+                importer.assert_not_called()
+                for mode in (None, 'timeline', 'context'):
+                    importer.return_value = {'mode': mode or 'timeline', 'verified': True}
+                    status, body = request(mode)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(importer.call_args.kwargs, {'mode': mode or 'timeline'})
+                    self.assertTrue(body['results'][0]['verified'])
+                importer.side_effect = TimelineError('请选择 --mode context')
+                status, body = request()
+                self.assertIn('--mode context', body['results'][0]['error'])
+                importer.side_effect = CodexError('private upstream content must not leak')
+                status, body = request()
+                self.assertNotIn('private upstream', json.dumps(body))
         finally:
             server.shutdown()
             server.server_close()

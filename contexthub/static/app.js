@@ -126,6 +126,9 @@ function saveBlob(blob, filename) {
 }
 function warningText(item) {
   const translations = {
+    "Reconstructed user/assistant text timeline with new IDs and import timestamps; original turn boundaries, timestamps and native state are not restored": "以新会话 ID 和导入时间重建用户/助手正文；不保留原始回合边界、时间和完整运行状态。",
+    "Tools, attachments, hidden reasoning, instructions, permissions and credentials are not migrated; no model turn was started": "未迁移工具、附件、隐藏推理、指令权限和凭据；没有启动模型调用。",
+    "Native GUI rendering and model continuation are not tested by this import": "此次导入不验证原生图形界面呈现或模型续聊。",
     "Hidden conversation messages were omitted; private internal text is not imported.": "已省略隐藏消息，不导入内部私有文本。",
     "User system-instruction messages were omitted.": "已省略用户设置的系统指令消息。",
     "Analysis/reasoning or unsupported message channels were omitted; only visible conversation text is imported.": "已省略分析、推理或不支持的消息通道，仅导入可见对话正文。",
@@ -247,6 +250,10 @@ function configureNavigation() {
 function updateAccount(session) {
   state.user = session.user || null;
   state.csrf = session.csrf_token || null;
+  if (isDraft() && (!state.user || state.user.id !== draftStorage.owner)) {
+    clearTimeout(draftStorage.timer);
+    draftStorageStatus("登录已失效或账户已切换；自动保存暂停，本页内容仍可下载备份", true);
+  }
   $("account-name").textContent = state.user ? state.user.username : "";
   $("account-button").textContent = state.user ? "退出登录" : "登录 / 注册";
   if (state.view === "reader" && state.reader && state.reader.kind === "hub") renderVersionWorkspace(state.reader);
@@ -421,27 +428,42 @@ function requireSavedEditor() {
 }
 function editMessage(section, content, conversation, message, controls) {
   if (!requireSavedEditor()) return;
-  controls.hidden = true;
-  content.hidden = true;
+  controls.hidden = true; content.hidden = true;
+  const originalMessage = structuredClone(message);
+  const originalAnnotations = structuredClone(conversation.annotations || []);
+  const draft = isDraft();
+  let recorded = false;
   const textarea = node("textarea", "message-editor");
   textarea.value = message.content || "";
   textarea.setAttribute("aria-label", `编辑${roleLabel(message.role)}的消息`);
-  const footer = node("div", "editor-help", isDraft() ? "修改暂存于页面草稿。预览并保存新版本后，其他人才能看到。" : "保存后将标记为人工编辑。原始 Codex 会话不会改变。");
-  const buttons = node("div", "message-actions");
-  buttons.append(action("保存修改", "button button-small", () => {
-    if (message.content !== textarea.value) {
-      message.content = textarea.value;
-      if (!Array.isArray(message.transformations)) message.transformations = [];
-      if (!message.transformations.includes("human_edited")) message.transformations.push("human_edited");
+  const apply = () => {
+    if (message.content === textarea.value) return;
+    message.content = textarea.value;
+    if (!Array.isArray(message.transformations)) message.transformations = [];
+    if (!message.transformations.includes("human_edited")) message.transformations.push("human_edited");
+    if (!recorded) {
       if (!Array.isArray(conversation.annotations)) conversation.annotations = [];
       conversation.annotations.push({ kind: "human_edited", text: `message_edited at ${new Date().toISOString()}`, message_id: message.id });
+      recorded = true;
+    }
+    draftChanged();
+  };
+  if (draft) textarea.addEventListener("input", apply);
+  const footer = node("div", "editor-help", draft ? "输入会自动保存为仅自己可见的草稿。完成编辑后，预览并发布新版本。" : "保存后将标记为人工编辑。原始 Codex 会话不会改变。");
+  const buttons = node("div", "message-actions");
+  buttons.append(action("保存修改", "button button-small", () => {
+    apply(); renderConversation();
+    showStatus(draft ? "修改已加入私有草稿，请查看服务器保存状态。" : "修改已保存到导出副本，并保留人工编辑记录。");
+  }), action("取消", "button button-small", () => {
+    if (draft) {
+      for (const key of Object.keys(message)) delete message[key];
+      Object.assign(message, originalMessage);
+      conversation.annotations = originalAnnotations;
       draftChanged();
-      showStatus(isDraft() ? "修改已暂存到草稿，并保留人工编辑记录。" : "修改已保存到导出副本，并保留人工编辑记录。");
     }
     renderConversation();
-  }), action("取消", "button button-small", renderConversation));
-  section.append(textarea, footer, buttons);
-  textarea.focus();
+  }));
+  section.append(textarea, footer, buttons); textarea.focus();
 }
 function markdown(conversation) {
   const parts = [`# ${conversation.title || "未命名对话"}`, "", `来源 ID: ${conversation.id || "未知"}`, "", "## 来源记录", "", "```json", JSON.stringify(provenanceRecord(conversation), null, 2), "```", ""];
@@ -856,7 +878,7 @@ async function importPackage() {
   if (!cwd) throw new Error("请填写目标工作目录。");
   if (!file || file !== state.inspectedFile) throw new Error("请先检查当前选择的对话包。");
   await busy($("import-confirm"), "创建新会话中…", async () => {
-    const data = await api(`/api/local/import?cwd=${encodeURIComponent(cwd)}`, { method: "POST", headers: { "Content-Type": "application/zip" }, body: file });
+    const data = await api(`/api/local/import?cwd=${encodeURIComponent(cwd)}&mode=${encodeURIComponent($("import-mode").value)}`, { method: "POST", headers: { "Content-Type": "application/zip" }, body: file });
     renderReceipt(data);
     state.inspectedFile = null;
     showStatus("导入请求已完成，请查看每个会话的回执与验证范围。");
@@ -879,7 +901,10 @@ function renderReceipt(data) {
       const line = node("p", "", failed ? "已创建会话 ID（内容导入未完成）：" : "新会话 ID："); line.append(node("code", "", result.thread_id)); box.append(line);
       box.append(action("复制会话 ID", "button button-small", () => perform(async () => { await copyText(result.thread_id); showStatus("会话 ID 已复制。"); })));
     }
-    if (result.mode) box.append(node("p", "", `恢复方式：${result.mode}`));
+    if (result.mode) box.append(node("p", "", `恢复方式：${result.mode === "timeline" ? "原生文本时间线重建" : result.mode === "context" ? "上下文注入" : result.mode}`));
+    if (result.mode === "timeline" && !failed) {
+      box.append(node("p", "", "已重建新会话的文本时间线；回执分别记录内容读回、持久化与 resume 检查。没有运行模型或迁移原机器工具权限。"));
+    }
     if (result.verified !== undefined) {
       box.append(node("p", "", `服务端验证结果：${typeof result.verified === "boolean" ? result.verified ? "公开 API 内容读回匹配（不代表重启、原生界面或模型续聊已验证）" : "尚未验证" : JSON.stringify(result.verified)}`));
     }

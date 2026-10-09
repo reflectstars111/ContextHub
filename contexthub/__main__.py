@@ -108,9 +108,11 @@ def parser():
     p.add_argument('--dry-run', action='store_true', help='只检查转换结果，不保存文件')
     p.add_argument('--confirm-import', action='store_true', help='已阅读检查报告，接受转换遗漏或原文存档')
     p.add_argument('--force', action='store_true')
-    p = sub.add_parser('import', help='导入迁移包为新的 Codex 上下文会话')
+    p = sub.add_parser('import', help='导入迁移包为新的 Codex 文本时间线或上下文会话')
     p.add_argument('file')
     p.add_argument('--cwd', default=str(Path.cwd()))
+    p.add_argument('--mode', choices=('timeline', 'context'), default='timeline',
+                   help='timeline 重建可恢复的文本时间线（Codex 0.153.4）；context 仅注入上下文')
     p.add_argument('--dry-run', action='store_true', help='只检查迁移包，不写入 Codex')
     p = sub.add_parser('upload', help='上传迁移包或平台导出文件到 ContextHub')
     p.add_argument('file')
@@ -222,24 +224,27 @@ def main(argv=None):
         elif args.action == 'import':
             package = read_package(Path(args.file).read_bytes())
             if args.dry_run:
-                emit({'dry_run': True, **inspect_package(package)})
+                emit({'dry_run': True, 'import_mode': args.mode, **inspect_package(package)})
                 return 0
             if any(c['source'].get('kind') == 'source_archive' for c in package['conversations']):
                 raise ValueError('原文存档尚未解析为对话，不能作为会话恢复；请先将原文件转换为角色消息')
             cwd = Path(args.cwd).resolve()
             if not cwd.is_dir():
                 raise ValueError('目标项目目录不存在')
-            from .codex import CodexClient, import_conversation
+            from .codex import CodexClient, TimelineError, import_conversation
             results = []
             with CodexClient() as client:
                 for conversation in package['conversations']:
                     try:
-                        result = import_conversation(client, conversation, str(cwd))
+                        result = import_conversation(client, conversation, str(cwd), mode=args.mode)
+                    except TimelineError as exc:
+                        result = {'title': conversation['title'], 'mode': 'failed', 'verified': False,
+                                  'error': str(exc)}
                     except Exception as exc:
                         result = {'title': conversation['title'], 'mode': 'failed', 'verified': False,
                                   'error': f'导入未完成：{type(exc).__name__}，请核查部分创建的会话'}
                     results.append(result)
-            emit({'results': results, 'note': '导入只创建上下文，不自动调用模型；请查看逐条兼容报告。'})
+            emit({'results': results, 'note': '导入创建新的文本时间线或上下文，不自动调用模型；请查看逐条兼容报告。'})
             return 1 if any(r.get('error') or r.get('mode') == 'failed' or r.get('injected') is False for r in results) else 0
         else:
             from .codex import CodexClient, export_conversation, list_sessions

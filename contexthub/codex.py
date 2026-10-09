@@ -1,8 +1,9 @@
 """Codex app-server adapter. No model turn is started by transfer operations.
 
 Exports are a text projection of a stable prefix of completed turns. Imports
-append user/assistant context to a new local thread; they do not restore the
-source computer, permissions, tool execution, or native UI timeline.
+rebuild a native text timeline on explicitly supported Codex versions, or use
+the explicit context-only compatibility mode. Neither restores source machine
+state, permissions, instructions, or tool execution.
 """
 from __future__ import annotations
 
@@ -34,6 +35,10 @@ class CodexError(ValueError):
     def __init__(self, message, code=None):
         super().__init__(message)
         self.code = code
+
+
+class TimelineError(CodexError):
+    """A controlled, user-facing timeline compatibility or validation message."""
 
 
 def _default_command(*, windows=None, machine=None):
@@ -206,6 +211,10 @@ class CodexClient:
     def __exit__(self, exc_type, exc, tb):
         self.close()
 
+    def reopen(self):
+        """A separate process for verifying persisted imports, using the same target."""
+        return CodexClient(command=self.command, timeout=self.timeout)
+
 
 def _pages(client, method, params):
     cursor = None
@@ -346,13 +355,9 @@ def export_conversation(client, thread_id):
     return result
 
 
-def import_conversation(client, conversation, cwd):
-    """Inject text context into a fresh thread using target-local configuration.
-
-    `verified` only reports observed public API content readback. A successful
-    injection alone does not verify restart persistence, UI, or model inference.
-    """
-    target = Path(cwd).expanduser().resolve()
+def _import_text(conversation, cwd):
+    """Validate untrusted package text before any Codex mutation."""
+    target = Path(cwd).expanduser().absolute()
     if not target.is_dir():
         raise ValueError("Import cwd must be an existing directory")
     if not isinstance(conversation, dict) or not isinstance(conversation.get("messages"), list):
@@ -382,6 +387,26 @@ def import_conversation(client, conversation, cwd):
         raise ValueError("Import context exceeds 5 MiB; select a smaller conversation")
     if conversation.get("context"):
         warnings.append("Conversation context metadata remains in the package and is not injected as instructions")
+    return target, items, expected, warnings
+
+
+def import_conversation(client, conversation, cwd, *, mode="timeline"):
+    """Create a fresh text timeline, or explicitly inject context only."""
+    if mode not in ("timeline", "context"):
+        raise ValueError("Import mode must be timeline or context")
+    if mode == "timeline":
+        from .codex_timeline import import_timeline
+        return import_timeline(client, conversation, cwd)
+    return _import_context(client, conversation, cwd)
+
+
+def _import_context(client, conversation, cwd):
+    """Inject text context into a fresh thread using target-local configuration.
+
+    `verified` only reports observed public API content readback. A successful
+    injection alone does not verify restart persistence, UI, or model inference.
+    """
+    target, items, expected, warnings = _import_text(conversation, cwd)
     thread = client.request("thread/start", {"cwd": str(target), "ephemeral": False}).get("thread", {})
     identifier = thread.get("id")
     if not isinstance(identifier, str) or not identifier or identifier == conversation.get("id"):

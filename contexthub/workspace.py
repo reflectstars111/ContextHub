@@ -1,4 +1,4 @@
-"""A single-branch, explicit-file conversation workspace.
+"""A branched, explicit-file conversation workspace with conservative merges.
 
 Only library.json and the conversation IDs it names are staged. Immutable
 packages and commit records live below .contexthub; one atomic state file is
@@ -23,11 +23,18 @@ from .package import (MAX_ARCHIVE_BYTES, MAX_CONVERSATION_BYTES,
                       PackageError, _json_bytes, _load_json, build_package,
                       read_package)
 from .revisions import build_revision, compare_packages
+from .merge import merge_packages
 from . import safe_fs as fs
 
 
 class WorkspaceError(ValueError):
     """The workspace cannot safely complete the requested operation."""
+
+
+class MergeConflict(WorkspaceError):
+    def __init__(self, details):
+        self.details = details
+        super().__init__('合并有冲突；本地文件和双方提交均已保留。检查冲突后编辑文件、ctx add .，再 ctx merge 分支 --resolved')
 
 
 class _WorktreeChanged(WorkspaceError):
@@ -38,6 +45,16 @@ _HASH = re.compile(r'[0-9a-f]{64}\Z')
 _FILE = re.compile(r'conversations/[0-9a-f]{64}\.json\Z')
 _LIMIT = MAX_TOTAL_BYTES + 4 * MAX_METADATA_BYTES
 _UNCHECKED = object()
+_MAX_BRANCHES = 1000
+
+
+def _branch_name(name):
+    if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,99}', name)
+            or name in ('HEAD', 'INDEX', 'WORKTREE') or '..' in name or '//' in name
+            or any(part.startswith('.') or part.endswith(('.', '.lock')) for part in name.split('/'))
+            or name.endswith('/')):
+        raise WorkspaceError('分支名需为 1–100 个字母、数字、点、横线、下划线或斜线，且不能含路径跳转')
+    return name
 
 
 def _hash(data):
@@ -181,7 +198,9 @@ class Workspace:
                 try:
                     for name in ('objects', 'commits', 'backups'):
                         fs.mkdir(meta, name)
-                    state = {'schema_version': 1, 'head': None, 'index': None,
+                    state = {'schema_version': 2, 'branch': 'main', 'upload_keys': {'main': uuid.uuid4().hex},
+                             'branches': {'main': {'head': None, 'remote': None}},
+                             'head': None, 'index': None,
                              'remote': None, 'managed': ['library.json'], 'transaction': None}
                     _atomic(meta, 'state.json', _json_bytes(state))
                     fs.mkdir(root, 'conversations')
@@ -261,7 +280,17 @@ class Workspace:
     def _state(self):
         value = _json(self._fds[1], 'state.json')
         required = {'schema_version', 'head', 'index', 'remote', 'managed', 'transaction'}
-        if (set(value) != required or type(value['schema_version']) is not int or value['schema_version'] != 1
+        if not isinstance(value, dict):
+            raise WorkspaceError('工作区 state.json 无效')
+        if value.get('schema_version') == 1 and set(value) == required:
+            # Read old workspaces without touching their files. The next
+            # successful mutation atomically publishes the migrated state.
+            value.update(schema_version=2, branch='main',
+                         branches={'main': {'head': value['head'], 'remote': copy.deepcopy(value['remote'])}})
+        if value.get('schema_version') == 2 and set(value) == required | {'branch', 'branches'}:
+            value['upload_keys'] = {}
+        required |= {'branch', 'branches', 'upload_keys'}
+        if (set(value) != required or type(value['schema_version']) is not int or value['schema_version'] != 2
                 or not isinstance(value['managed'], list)
                 or len(value['managed']) > MAX_CONVERSATIONS + 1
                 or any(not self._valid_path(path) for path in value['managed'])
@@ -271,8 +300,24 @@ class Workspace:
         for key in ('head', 'index'):
             if value[key] is not None and (not isinstance(value[key], str) or not _HASH.fullmatch(value[key])):
                 raise WorkspaceError(f'工作区 {key} 无效')
-        if value['remote'] is not None:
-            self._validate_remote(value['remote'])
+        branches = value['branches']
+        if not isinstance(branches, dict) or not 1 <= len(branches) <= _MAX_BRANCHES:
+            raise WorkspaceError('工作区分支记录无效')
+        keys = value['upload_keys']
+        if (not isinstance(keys, dict) or set(keys) - set(branches)
+                or any(not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{32}', key) for key in keys.values())):
+            raise WorkspaceError('工作区分支上传标识无效')
+        for name, branch in branches.items():
+            _branch_name(name)
+            if (not isinstance(branch, dict) or set(branch) != {'head', 'remote'}
+                    or (branch['head'] is not None and (
+                        not isinstance(branch['head'], str) or not _HASH.fullmatch(branch['head'])))):
+                raise WorkspaceError('工作区分支指针无效')
+            if branch['remote'] is not None:
+                self._validate_remote(branch['remote'])
+        if (not isinstance(value['branch'], str) or value['branch'] not in branches
+                or branches[value['branch']] != {'head': value['head'], 'remote': value['remote']}):
+            raise WorkspaceError('当前分支与工作区指针不一致')
         if value['transaction'] is not None and (
                 not isinstance(value['transaction'], str)
                 or not re.fullmatch(r'[0-9a-f]{32}', value['transaction'])):
@@ -322,29 +367,39 @@ class Workspace:
             raise WorkspaceError('无效的提交 ID')
         with self._subdir('commits') as fd:
             record = _json(fd, identifier + '.json')
-        if record.get('id') != identifier:
+        if not isinstance(record, dict) or record.get('id') != identifier:
             raise WorkspaceError('提交 ID 不一致')
         contents = {key: value for key, value in record.items() if key != 'id'}
-        if (set(contents) != {'parent', 'sha256', 'message', 'created_at'}
+        if (set(contents) not in ({'parent', 'sha256', 'message', 'created_at'},
+                                  {'parent', 'merge_parent', 'sha256', 'message', 'created_at'})
                 or _hash(_json_bytes(contents)) != identifier
                 or not isinstance(contents['sha256'], str)
                 or not _HASH.fullmatch(contents['sha256'])
                 or (contents['parent'] is not None and (
                     not isinstance(contents['parent'], str) or not _HASH.fullmatch(contents['parent'])))):
             raise WorkspaceError('提交记录校验失败')
+        if 'merge_parent' in contents and (not isinstance(contents['merge_parent'], str)
+                or not _HASH.fullmatch(contents['merge_parent']) or contents['merge_parent'] == contents['parent']):
+            raise WorkspaceError('合并提交的父记录无效')
+        if (not isinstance(contents['message'], str) or not 1 <= len(contents['message']) <= 2000
+                or not isinstance(contents['created_at'], str) or len(contents['created_at']) > 100):
+            raise WorkspaceError('提交元数据无效')
         return record
 
-    def _save_commit(self, data, message, parent):
+    def _save_commit(self, data, message, parent, merge_parent=None, created_at=None):
         if not isinstance(message, str) or not message.strip() or len(message) > 2000:
             raise WorkspaceError('提交说明需要 1–2000 个字符')
         contents = {'parent': parent, 'sha256': self._save_object(data),
-                    'message': message.strip(), 'created_at': datetime.now(timezone.utc).isoformat()}
+                    'message': message.strip(), 'created_at': created_at or datetime.now(timezone.utc).isoformat()}
+        if merge_parent is not None:
+            contents['merge_parent'] = merge_parent
         record = dict(contents, id=_hash(_json_bytes(contents)))
         with self._subdir('commits') as fd:
             _atomic(fd, record['id'] + '.json', _json_bytes(record))
         return record
 
     def _write_state(self, state):
+        state['branches'][state['branch']] = {'head': state['head'], 'remote': copy.deepcopy(state['remote'])}
         _atomic(self._fds[1], 'state.json', _json_bytes(state))
 
     def _cleanup_journal(self, journal):
@@ -539,7 +594,7 @@ class Workspace:
             if ref == 'INDEX':
                 digest = state['index']
             else:
-                identifier = state['head'] if ref == 'HEAD' else ref
+                identifier = self._resolve(ref, state)
                 if not identifier:
                     raise WorkspaceError('尚无提交，请先 ctx add 和 ctx commit')
                 digest = self._commit_record(identifier)['sha256']
@@ -595,37 +650,232 @@ class Workspace:
             self._write_state(state)
             return record
 
-    def log(self):
+    def _resolve(self, ref, state=None):
+        state = state or self._state()
+        if ref == 'HEAD':
+            return state['head']
+        if ref in state['branches']:
+            return state['branches'][ref]['head']
+        self._commit_record(ref)
+        return ref
+
+    def branches(self):
         with self.locked():
-            identifier = self._state()['head']
-            result, seen = [], set()
-            while identifier:
+            state = self._state()
+            return [dict(copy.deepcopy(value), name=name, current=name == state['branch'])
+                    for name, value in sorted(state['branches'].items())]
+
+    def branch(self, name, ref='HEAD'):
+        _branch_name(name)
+        with self.locked():
+            state = self._state()
+            if name in state['branches'] or len(state['branches']) >= _MAX_BRANCHES:
+                raise WorkspaceError('分支已存在或超过分支数量限制')
+            head = self._resolve(ref, state)
+            if head is None:
+                raise WorkspaceError('请先创建首次提交，再新建分支')
+            # A new branch must not accidentally publish to its parent's Hub.
+            state['branches'][name] = {'head': head, 'remote': None}
+            state['upload_keys'][name] = uuid.uuid4().hex
+            self._write_state(state)
+            return self.branches()
+
+    def upload_key(self):
+        """Persist a branch-scoped creation key before attempting any upload."""
+        with self.locked():
+            state = self._state()
+            if state['branch'] not in state['upload_keys']:
+                state['upload_keys'][state['branch']] = uuid.uuid4().hex
+                self._write_state(state)
+            return state['upload_keys'][state['branch']]
+
+    def _clean_snapshot(self, *, staged=False):
+        expected = {}
+        status = self.status(_snapshot=expected)
+        if status['modified'] or (status['staged'] and not staged):
+            raise WorkspaceError('工作区有未提交修改；请先检查、暂存并提交，文件保持不变')
+        return expected
+
+    def switch(self, name, create=False):
+        _branch_name(name)
+        with self.locked():
+            expected = self._clean_snapshot()
+            state = self._state()
+            if create:
+                self.branch(name)
+                state = self._state()
+            if name not in state['branches']:
+                raise WorkspaceError('分支不存在；可使用 ctx switch -c 分支名 新建')
+            target = state['branches'][name]
+            if not target['head']:
+                raise WorkspaceError('目标分支尚无提交')
+            record = self._commit_record(target['head'])
+            state.update(branch=name, head=target['head'], index=record['sha256'],
+                         remote=copy.deepcopy(target['remote']))
+            self._transition(state, self._files(read_package(self._object(record['sha256']))), expected=expected)
+            return self.status()
+
+    def history(self, ref='HEAD'):
+        """All reachable commits, children before parents, rejecting cycles."""
+        with self.locked():
+            head = self._resolve(ref)
+            records, active, done, ordered = {}, set(), set(), []
+            stack = [(head, False)] if head else []
+            while stack:
+                identifier, visited = stack.pop()
+                if visited:
+                    active.remove(identifier)
+                    done.add(identifier)
+                    ordered.append(records[identifier])
+                    continue
+                if identifier in done:
+                    continue
+                if identifier in active or len(records) >= 100000:
+                    raise WorkspaceError('提交历史循环或超过读取限制')
+                record = records.setdefault(identifier, self._commit_record(identifier))
+                active.add(identifier)
+                stack.append((identifier, True))
+                for parent in (record.get('merge_parent'), record['parent']):
+                    if parent:
+                        stack.append((parent, False))
+            return list(reversed(ordered))
+
+    def log(self):
+        return self.history()
+
+    def _ancestor_ids(self, head):
+        return {record['id'] for record in self.history(head)} if head else set()
+
+    def _merge_base(self, ours, theirs):
+        left = self._ancestor_ids(ours)
+        right = self._ancestor_ids(theirs)
+        common = left & right
+        if not common:
+            raise WorkspaceError('双方没有共同祖先，无法自动合并；请显式导入所需对话')
+        # The newest common ancestors must form a single base. Refuse ambiguous
+        # criss-cross merges rather than silently selecting a lossy base.
+        older = set()
+        for identifier in common:
+            record = self._commit_record(identifier)
+            for key in ('parent', 'merge_parent'):
+                if record.get(key):
+                    older.add(record[key])
+        candidates = common - older
+        if len(candidates) != 1:
+            raise WorkspaceError('存在多个共同合并基准，请人工整理后再合并')
+        return candidates.pop()
+
+    def merge(self, ref, message=None, resolved=False):
+        with self.locked():
+            state = self._state()
+            ours, theirs = state['head'], self._resolve(ref, state)
+            if not ours or not theirs:
+                raise WorkspaceError('合并双方必须已有提交')
+            expected = self._clean_snapshot(staged=resolved)
+            if theirs in self._ancestor_ids(ours):
+                return {'merged': False, 'fast_forward': False, 'status': self.status()}
+            target_remote = state['branches'].get(ref, {}).get('remote')
+            adopt_remote = bool(target_remote and state['remote'] and
+                                (target_remote['url'], target_remote['package_id']) ==
+                                (state['remote']['url'], state['remote']['package_id']) and
+                                target_remote['local_commit'] != state['remote']['local_commit'] and
+                                state['remote']['local_commit'] in self._ancestor_ids(target_remote['local_commit']))
+            if ours in self._ancestor_ids(theirs) and not resolved:
+                record = self._commit_record(theirs)
+                data = self._object(record['sha256'])
+                fast_forward = True
+            else:
+                base = self._merge_base(ours, theirs)
+                if resolved:
+                    data = self._object(state['index'])
+                else:
+                    result = merge_packages(read_package(self.package_bytes(base)),
+                                            read_package(self.package_bytes()),
+                                            read_package(self.package_bytes(theirs)))
+                    if result['conflicts']:
+                        raise MergeConflict(dict(result, package=None, branch=ref, base=base,
+                                                 ours=ours, theirs=theirs))
+                    data = result['package']
+                # Existing Hub pushes validate revisions against their latest
+                # checkpoint. Preserve both original audit histories in the DAG,
+                # while recording this new snapshot against the applicable base.
+                revision_base = self.package_bytes(target_remote['local_commit'] if adopt_remote else ours)
+                package = read_package(data)
+                data = _revision_data(revision_base, dict(package['library'], conversations=package['conversations']))
+                record = self._save_commit(data, message or f'合并 {ref}', ours, merge_parent=theirs)
+                fast_forward = False
+            state.update(head=record['id'], index=record['sha256'])
+            if adopt_remote:
+                state['remote'] = copy.deepcopy(target_remote)
+            self._transition(state, self._files(read_package(data)), expected=expected)
+            return {'merged': True, 'fast_forward': fast_forward, 'commit': record, 'status': self.status()}
+
+    def pending_commits(self):
+        with self.locked():
+            state = self._state()
+            checkpoint = state['remote']['local_commit'] if state['remote'] else None
+            pending, identifier, seen = [], state['head'], set()
+            while identifier and identifier != checkpoint:
                 if identifier in seen or len(seen) >= 100000:
                     raise WorkspaceError('提交历史循环或超过读取限制')
                 seen.add(identifier)
                 record = self._commit_record(identifier)
-                result.append(record)
-                identifier = record['parent']
-            return result
-
-    def pending_commits(self):
-        with self.locked():
-            remote = self._state()['remote']
-            checkpoint = remote['local_commit'] if remote else None
-            pending = []
-            for record in self.log():
-                if record['id'] == checkpoint:
-                    return list(reversed(pending))
                 pending.append(record)
-            if checkpoint:
+                # After pulling a divergence the Hub checkpoint is on the
+                # second parent. Only the merge result and newer commits need
+                # uploading; replaying the other side would undo remote edits.
+                if checkpoint and checkpoint in self._ancestor_ids(record.get('merge_parent')):
+                    return list(reversed(pending))
+                identifier = record['parent']
+            if checkpoint and identifier != checkpoint:
                 raise WorkspaceError('远端跟踪提交不在本地历史中')
             return list(reversed(pending))
+
+    def integrate_remote(self, data, remote, expected_head=None):
+        """Pull a remote divergence without discarding either side on conflict."""
+        read_package(data)
+        with self.locked():
+            state = self._state()
+            if expected_head is not None and state['head'] != expected_head:
+                raise WorkspaceError('本地 HEAD 已变化，拉取已取消')
+            self._clean_snapshot()
+            if not self.pending_commits():
+                return self.checkout_remote(data, remote, expected_head)
+            previous = state['remote']
+            if not previous or (previous['url'], previous['package_id']) != (remote['url'], remote['package_id']):
+                raise WorkspaceError('拉取不能切换到另一个远端库')
+            incoming = 'incoming/' + _hash((remote['package_id'] + '/' + remote['version_id'] + '/' +
+                                             previous['local_commit']).encode('utf-8'))[:16]
+            stem, suffix = incoming, 0
+            existing = state['branches'].get(incoming)
+            # Preserve an incoming branch if the user has since committed on it.
+            while existing and (not existing['remote'] or existing['head'] != existing['remote']['local_commit']):
+                suffix += 1
+                incoming = stem + '-' + str(suffix)
+                existing = state['branches'].get(incoming)
+            if existing and existing['remote'] and existing['remote']['version_id'] == remote['version_id']:
+                record = self._commit_record(existing['head'])
+                if self._object(record['sha256']) != data:
+                    raise WorkspaceError('同一远端版本返回了不同内容，已停止合并')
+            else:
+                if existing:
+                    raise WorkspaceError('远端临时分支名已存在，请保留并检查现有分支')
+                record = self._save_commit(data, f'从 Hub 拉取版本 {remote["version_id"]}', previous['local_commit'])
+            remote = copy.deepcopy(remote)
+            remote['local_commit'] = record['id']
+            self._validate_remote(remote)
+            if len(state['branches']) >= _MAX_BRANCHES:
+                raise WorkspaceError('分支数量超过限制')
+            state['branches'][incoming] = {'head': record['id'], 'remote': remote}
+            self._write_state(state)
+            result = self.merge(incoming, message=f'合并 Hub 版本 {remote["version_id"]}')
+            return result['status']
 
     def status(self, *, _snapshot=None):
         with self.locked():
             state = self._state()
             base = self._commit_record(state['head'])['sha256'] if state['head'] else None
-            result = {'head': state['head'], 'staged': state['index'] != base,
+            result = {'branch': state['branch'], 'head': state['head'], 'staged': state['index'] != base,
                       'modified': False, 'remote': copy.deepcopy(state['remote']),
                       'ahead': len(self.pending_commits()), 'conversations': 0}
             try:
@@ -705,7 +955,7 @@ class Workspace:
             if previous:
                 if (previous['url'], previous['package_id']) != (remote['url'], remote['package_id']):
                     raise WorkspaceError('不能将已有工作区静默切换到另一个远端库')
-                if ancestry.index(remote['local_commit']) > ancestry.index(previous['local_commit']):
+                if previous['local_commit'] not in self._ancestor_ids(remote['local_commit']):
                     raise WorkspaceError('远端跟踪提交不能后退')
             state['remote'] = remote
             self._write_state(state)

@@ -1,6 +1,6 @@
 "use strict";
 
-// Immutable versions live on the server. A working copy exists only in this tab.
+// Published versions are immutable; private drafts use server revision checks.
 const versionState = { original: null, versions: [], request: 0, preview: null, candidate: null, candidateRequest: 0, saving: false, forkTarget: null };
 function isDraft() { return Boolean(state.reader && state.reader.kind === "draft"); }
 function versionOwner(data = state.reader) {
@@ -24,12 +24,13 @@ function clearVersionURL() {
 function leaveDraft() {
   if (!isDraft()) return true;
   if (versionState.saving) { showStatus("正在保存，请等待保存结果。", "warning"); return false; }
-  if (!window.confirm("当前草稿尚未保存。离开将丢弃这份草稿，是否继续？")) return false;
+  if (!draftSynced() && !window.confirm("本页还有未同步的草稿修改，离开会丢失这些修改。服务器上已保存的草稿仍可恢复。是否继续？")) return false;
   state.reader = versionState.original;
   clearDraftState();
   return true;
 }
 function clearDraftState() {
+  resetDraftStorage();
   versionState.original = null;
   versionState.preview = null;
   versionState.candidate = null;
@@ -45,11 +46,13 @@ function draftChanged() {
   $("save-version").disabled = true;
   $("draft-status").textContent = "草稿已更新，请重新预览";
   $("draft-comparison").hidden = true;
+  scheduleDraftSave();
 }
 function renderVersionWorkspace(data) {
   const hub = data.kind === "hub" || data.kind === "draft";
   $("version-workspace").hidden = !hub;
   renderPackageContributions(data);
+  renderLibrarySettings(data);
   if (!hub) return;
   const draft = isDraft();
   const version = data.version || {};
@@ -76,6 +79,7 @@ function renderVersionWorkspace(data) {
     $("version-comparison").replaceChildren();
     updateVersionURL(data);
     perform(() => loadVersions(data));
+    perform(() => checkStoredDraft(data));
   }
 }
 async function loadVersions(data) {
@@ -98,29 +102,45 @@ async function loadVersions(data) {
   $("compare-from").value = previous ? previous.id : (versionState.versions.at(-1) || {}).id || "";
   $("compare-versions").disabled = versionState.versions.length < 2;
 }
-function startDraft() {
+async function startDraft() {
   if (!state.reader || !versionOwner() || !requireSavedEditor()) return;
-  state.readerRequest++;
-  if (state.reader.version.id !== state.reader.head_version_id) throw new Error("请先切换到最新版本再创建编辑副本。");
-  versionState.original = state.reader;
+  const loaded = await loadDraftForEditing(state.reader);
+  if (!loaded) return;
+  const { original, draft } = loaded;
+  if (!draft && original.version.id !== original.head_version_id) throw new Error("请先切换到最新版本再创建编辑副本。");
+  versionState.original = original;
   versionState.preview = null;
-  $("draft-title").value = state.reader.title || "";
-  $("draft-description").value = state.reader.description || "";
-  $("version-message").value = "";
+  $("draft-title").value = draft ? draft.title : original.title || "";
+  $("draft-description").value = draft ? draft.description : original.description || "";
+  $("version-message").value = draft ? draft.message : "";
   $("draft-status").textContent = "尚未预览";
   $("save-version").disabled = true;
-  $("save-version").textContent = state.reader.visibility === "public" ? "发布新版本" : "保存新版本";
-  $("draft-boundary").textContent = state.reader.visibility === "public" ? "草稿只保存在当前页面。发布后，任何人都能阅读新版本，登录后可下载。历史版本保持不变。" : "草稿只保存在当前页面。保存后仅你可见，历史版本保持不变。";
+  $("save-version").textContent = original.visibility === "public" ? "发布新版本" : "保存新版本";
+  $("draft-boundary").textContent = "草稿自动保存到服务器，仅你可见。" + (original.visibility === "public" ? "发布后，任何人都能阅读新版本，登录后可下载。" : "保存的新版本也仅你可见。") + "历史版本保持不变。";
   clearCandidate();
-  openReader({ ...structuredClone(state.reader), kind: "draft" });
-  showStatus("已创建编辑副本。可以修改正文，或导入对话包替换整份草稿。保存前请预览变化。");
+  openReader({ ...structuredClone(original), ...(draft ? { conversations: structuredClone(draft.conversations) } : {}), kind: "draft" });
+  if (draft) {
+    draftStorage.signature = JSON.stringify(privateDraftPayload());
+    draftStorageStatus("已恢复服务器草稿，仅你可见");
+  } else scheduleDraftSave();
+  showStatus(draft ? "已恢复服务器草稿。发布权限以当前对话库设置为准，请检查可见性并重新预览；若基准已更新，草稿仍会保留。" : "已创建私有编辑副本；修改会自动保存，发布前请预览变化。");
 }
-function discardDraft() {
-  if (!isDraft() || versionState.saving || !window.confirm("丢弃当前草稿？已保存的版本不会改变。")) return;
-  const original = versionState.original;
-  clearDraftState();
-  openReader(original);
-  showStatus("草稿已丢弃，正在阅读已保存的版本。");
+async function discardDraft() {
+  if (!isDraft() || versionState.saving || !window.confirm("丢弃当前草稿并移除对应的服务器草稿？已发布版本不会改变。")) return;
+  const original = versionState.original, epoch = draftStorage.epoch, owner = state.user && state.user.id;
+  const current = () => isDraft() && draftStorage.epoch === epoch && state.reader.id === original.id && state.user && state.user.id === owner;
+  clearTimeout(draftStorage.timer);
+  versionState.saving = true; $("reader-view").inert = true;
+  try {
+    while (draftStorage.pending) { try { await draftStorage.pending; } catch (_) { break; } }
+    if (!current()) return;
+    await api(`/api/packages/${encodeURIComponent(original.id)}/draft`, { method: "DELETE", json: { expected_revision: draftStorage.revision } });
+    if (!current()) return;
+    clearDraftState(); openReader(original);
+    showStatus("草稿已丢弃，正在阅读已保存的版本。");
+  } finally {
+    versionState.saving = false; $("reader-view").inert = false;
+  }
 }
 function versionPayload() {
   if (!isDraft()) throw new Error("请先创建编辑副本。");
@@ -129,7 +149,8 @@ function versionPayload() {
   const message = $("version-message").value.trim();
   if (!title) { $("draft-title").focus(); throw new Error("请填写对话库标题。"); }
   if (!message) { $("version-message").focus(); throw new Error("请填写本次保存说明。"); }
-  return { base_version: versionState.original.version.id, title, description: $("draft-description").value.trim(), conversations: state.reader.conversations, message };
+  return { base_version: versionState.original.version.id, expected_visibility: versionState.original.visibility,
+    title, description: $("draft-description").value.trim(), conversations: state.reader.conversations, message };
 }
 async function previewDraft() {
   versionState.preview = null;
@@ -152,19 +173,21 @@ async function previewDraft() {
     $("draft-comparison").scrollIntoView({ behavior: "smooth", block: "nearest" });
   }); } catch (error) {
     if (error.status !== 409) throw error;
-    $("draft-status").textContent = "出现新版本，草稿已保留";
+    $("draft-status").textContent = "版本或可见性已改变，草稿已保留";
     showStatus("另一处已保存了新版本，当前草稿已保留。请复制需要保留的修改，再丢弃草稿并打开最新版本。", "warning");
   }
 }
 async function saveDraft() {
   if (!isDraft() || versionState.saving) return;
   const payload = versionPayload();
+  if (payload.expected_visibility === "public" && !window.confirm("发布后任何人都能阅读本次修改，登录后可下载。确认公开发布新版本？")) return;
   if (versionState.preview !== JSON.stringify(payload)) { draftChanged(); throw new Error("内容已改变，请重新预览后保存。"); }
   versionState.saving = true;
   $("reader-view").inert = true;
   try {
     await busy($("save-version"), "保存中…", async () => {
-      const data = await api(`/api/packages/${encodeURIComponent(state.reader.id)}/versions`, { method: "POST", json: payload });
+      await flushDraftSave();
+      const data = await api(`/api/packages/${encodeURIComponent(state.reader.id)}/versions`, { method: "POST", json: { ...payload, draft_revision: draftStorage.revision } });
       clearDraftState();
       openReader({ ...data, kind: "hub" });
       await loadPackages();
@@ -174,8 +197,8 @@ async function saveDraft() {
     if (error.status === 409) {
       versionState.preview = null;
       $("save-version").disabled = true;
-      $("draft-status").textContent = "出现新版本，草稿已保留";
-      showStatus("另一处已保存了新版本。你的草稿仍在当前页面；请复制需要保留的修改，再丢弃草稿并打开最新版本。", "warning");
+      $("draft-status").textContent = "版本或可见性已改变，草稿已保留";
+      showStatus("另一处已保存了新版本。你的私有草稿仍被保留；可下载草稿备份，再打开最新版本整理修改。", "warning");
     } else throw error;
   } finally {
     versionState.saving = false;
@@ -352,10 +375,12 @@ async function compareVersions() {
   });
 }
 function bindVersionEvents() {
+  bindDraftStorageEvents();
+  bindLibrarySettingsEvents();
   $("version-select").addEventListener("change", () => perform(() => loadPackage(state.reader.id, $("version-select").value)));
   $("copy-version-link").addEventListener("click", () => perform(async () => { await copyText(versionURL(state.reader.id, state.reader.version.id).href); showStatus("固定版本链接已复制；私有版本仍需拥有者登录。 "); }));
   $("edit-package").addEventListener("click", () => perform(startDraft));
-  $("discard-draft").addEventListener("click", discardDraft);
+  $("discard-draft").addEventListener("click", () => perform(discardDraft));
   ["draft-title", "draft-description", "version-message"].forEach((id) => $(id).addEventListener("input", draftChanged));
   $("preview-version").addEventListener("click", () => perform(previewDraft));
   $("save-version").addEventListener("click", () => perform(saveDraft));
@@ -368,7 +393,7 @@ function bindVersionEvents() {
   $("compare-versions").addEventListener("click", () => { $("compare-panel").hidden = false; perform(compareVersions); });
   $("close-comparison").addEventListener("click", () => { $("compare-panel").hidden = true; });
   $("run-comparison").addEventListener("click", () => perform(compareVersions));
-  window.addEventListener("beforeunload", (event) => { if (isDraft()) { event.preventDefault(); event.returnValue = ""; } });
+  window.addEventListener("beforeunload", (event) => { if (isDraft() && !draftSynced()) { event.preventDefault(); event.returnValue = ""; } });
   window.addEventListener("popstate", () => perform(async () => {
     if (state.mode !== "hub") return;
     const current = state.reader;

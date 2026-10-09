@@ -363,7 +363,10 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(urlsplit(self.path).path)
             query = parse_qs(urlsplit(self.path).query)
             if path == '/api/config' and method == 'GET':
-                return self._send(200, {'mode': self.server.mode, 'version': __version__, 'max_package_bytes': self.server.max_body_bytes})
+                return self._send(200, {'mode': self.server.mode, 'version': __version__,
+                                        'max_package_bytes': self.server.max_body_bytes,
+                                        'capabilities': ({'new_library_key': True, 'expected_visibility': True}
+                                                         if self.server.mode == 'hub' else {})})
             if path.startswith('/api/local/'):
                 return self._local(method, path, query)
             if path.startswith('/api/'):
@@ -404,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, cli_checksum().encode(), 'text/plain; charset=utf-8')
             return self._send(200, cli_archive(), 'application/octet-stream',
                               {'Content-Disposition': 'attachment; filename="ctx.pyz"'})
-        allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/contributions.js': 'contributions.js', '/style.css': 'style.css', '/cli': 'cli.html', '/cli.css': 'cli.css'}
+        allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/contributions.js': 'contributions.js', '/drafts.js': 'drafts.js', '/lifecycle.js': 'lifecycle.js', '/style.css': 'style.css', '/cli': 'cli.html', '/cli.css': 'cli.css'}
         if path not in allowed:
             raise HTTPError(404, '未找到页面')
         file = STATIC / allowed[path]
@@ -465,14 +468,19 @@ class Handler(BaseHTTPRequestHandler):
                 messages = query.get('message', [None])
                 if len(messages) != 1:
                     raise ValueError('message 参数不能重复')
-                result = store.add_package(session['user'], blob, query.get('visibility', ['private'])[0], messages[0])
+                creation_keys = query.get('new_library_key', [None])
+                if len(creation_keys) != 1:
+                    raise ValueError('new_library_key 参数不能重复')
+                result = store.add_package(session['user'], blob, query.get('visibility', ['private'])[0],
+                                           messages[0], creation_keys[0])
                 return self._send(201, {**result, 'import_report': report})
         parts = path.strip('/').split('/')
         if len(parts) in (3, 4) and parts[:2] == ['api', 'packages']:
             ident = parts[2]
             mutating = method in ('POST', 'DELETE')
             downloading = method == 'GET' and len(parts) == 4 and parts[3] == 'download'
-            session = self._session(required=mutating or downloading, mutate=mutating)
+            private_draft = len(parts) == 4 and parts[3] == 'draft'
+            session = self._session(required=mutating or downloading or private_draft, mutate=mutating)
             user_id = (session['user'] or {}).get('id')
             if len(parts) == 4 and parts[3] == 'download' and method == 'GET':
                 return self._send(200, store.download(ident, user_id, version_id=query.get('version', [None])[0]), 'application/zip', {'Content-Disposition': f'attachment; filename="{ident}.contextpack"'})
@@ -483,6 +491,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {'deleted': True})
             if len(parts) == 4:
                 action = parts[3]
+                if action == 'draft':
+                    if method == 'GET':
+                        return self._send(200, store.get_draft(ident, user_id))
+                    if method == 'POST':
+                        return self._send(200, store.save_draft(ident, user_id, self._json()))
+                    if method == 'DELETE':
+                        return self._send(200, store.delete_draft(ident, user_id, self._json(4096).get('expected_revision')))
+                if method == 'POST' and action == 'visibility':
+                    data = self._json(4096)
+                    return self._send(200, store.set_visibility(ident, user_id, data.get('visibility'), data.get('base_version')))
+                if method == 'POST' and action == 'purge':
+                    return self._send(200, store.purge(ident, user_id, self._json(4096).get('confirmation')))
                 if action == 'contributions':
                     if method == 'GET':
                         return self._send(200, {'contributions': self.server.contributions.list(ident, user_id)})
@@ -518,6 +538,9 @@ class Handler(BaseHTTPRequestHandler):
                         if len(query.get(key, [])) != 1 or not query[key][0].strip():
                             raise ValueError(f'需要唯一且非空的 {key} 参数')
                     base_id, message = query['base_version'][0], query['message'][0].strip()
+                    visibilities = query.get('expected_visibility', [None])
+                    if len(visibilities) != 1:
+                        raise ValueError('expected_visibility 参数不能重复')
                     if len(message) > 2000:
                         raise ValueError('保存说明需为 1–2,000 个字符')
                     base = read_package(store.download(ident, user_id, version_id=base_id))
@@ -536,7 +559,8 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('本地快照的编辑记录与基准版本不一致，请使用最新 ctx 工具重新提交')
                     if all(base[field] == candidate[field] for field in fields):
                         raise ValueError('内容没有变化，无需创建新版本')
-                    return self._send(201, store.add_version(ident, session['user'], submitted, base_id, message))
+                    return self._send(201, store.add_version(ident, session['user'], submitted, base_id, message,
+                                                           expected_visibility=visibilities[0]))
                 if method == 'POST' and action in ('versions', 'preview'):
                     current = store.get(ident, user_id)
                     if current['owner_id'] != user_id:
@@ -554,7 +578,8 @@ class Handler(BaseHTTPRequestHandler):
                     if action == 'preview':
                         candidate = read_package(blob)
                         return self._send(200, {'comparison': compare_packages(base, candidate), 'compatibility': candidate['compatibility']})
-                    return self._send(201, store.add_version(ident, session['user'], blob, base_id, message.strip()))
+                    return self._send(201, store.add_version(ident, session['user'], blob, base_id, message.strip(),
+                                                           data.get('draft_revision'), data.get('expected_visibility')))
         raise HTTPError(404, '未找到此接口')
 
     def _contributions(self, method, path, query):
@@ -598,7 +623,7 @@ class Handler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(self.headers.get('X-ContextHub-Token', ''), self.server.connector_token):
             raise HTTPError(403, '连接器令牌无效，请使用终端提供的完整链接')
         self._origin()
-        from .codex import CodexClient, export_conversation, import_conversation, list_sessions
+        from .codex import CodexClient, TimelineError, export_conversation, import_conversation, list_sessions
         if method == 'GET' and path == '/api/local/sessions':
             with self.server.codex_lock, CodexClient(command=self.server.codex_command) as client:
                 sessions = list_sessions(client, include_archived=query.get('archived') == ['1'], include_subagents=query.get('subagents') == ['1'])
@@ -628,11 +653,17 @@ class Handler(BaseHTTPRequestHandler):
             cwd = query.get('cwd', [''])[0]
             if not cwd or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
                 raise ValueError('请选择存在的本地项目绝对路径')
+            modes = query.get('mode', ['timeline'])
+            if len(modes) != 1 or modes[0] not in ('timeline', 'context'):
+                raise ValueError('导入模式必须为 timeline 或 context')
             results = []
             with self.server.codex_lock, CodexClient(command=self.server.codex_command) as client:
                 for conversation in package['conversations']:
                     try:
-                        result = import_conversation(client, conversation, cwd)
+                        result = import_conversation(client, conversation, cwd, mode=modes[0])
+                    except TimelineError as exc:
+                        result = {'title': conversation['title'], 'verified': False,
+                                  'error': str(exc)[:500], 'mode': 'failed'}
                     except Exception as exc:
                         result = {'title': conversation['title'], 'verified': False, 'error': f'导入未完成：{type(exc).__name__}，请核查部分创建的会话'}
                     results.append(result)
