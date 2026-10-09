@@ -114,6 +114,34 @@ python3 -m contexthub serve --host 0.0.0.0 --port 8765 --data /srv/contexthub-da
 
 当前版本适合本地或受控环境试用。公网部署仍需 HTTPS 反向代理、请求与存储配额、备份及运维配置。备份时停止服务，保存整个数据目录，再以同一 `--data` 路径启动即可恢复。不要把本地连接器代理到公网。
 
+### 在 Linux 服务器常驻
+
+提供 [systemd 用户服务模板](deploy/systemd/contexthub.service)。它保留本机监听，异常退出后等待 3 秒重启，日志交由 journal 管理，CPU 调度优先级设为较低的 `Nice=10`。Hub 自身不运行模型，也不需要 GPU；没有请求时主要占用少量 Python 进程内存。上传大包、比较与合并会临时增加内存和 CPU，磁盘用量随包及版本增长。
+
+安装时先复制模板，并将其中 `WorkingDirectory` 改为实际项目绝对路径；`.context-data` 相对于此目录，迁移现有实例时必须指向原目录：
+
+```bash
+install -Dm644 deploy/systemd/contexthub.service ~/.config/systemd/user/contexthub.service
+# 编辑 ~/.config/systemd/user/contexthub.service 中的 WorkingDirectory
+systemd-analyze --user verify ~/.config/systemd/user/contexthub.service
+systemctl --user daemon-reload
+# 首次接管前停止原先手动启动的同端口 Hub
+systemctl --user enable --now contexthub.service
+```
+
+用 `loginctl show-user "$USER" -p Linger` 检查是否为 `Linger=yes`。该选项使用户服务在退出登录后持续运行，并在开机时启动；若未启用，请按服务器的管理权限执行 `loginctl enable-linger "$USER"`。本服务器已启用。
+
+```bash
+systemctl --user status contexthub.service      # 状态与资源
+systemctl --user restart contexthub.service     # 更新代码后重启
+systemctl --user stop contexthub.service        # 停止；手动停止不会自动重启
+journalctl --user -u contexthub.service -n 50 --no-pager
+```
+
+在不带完整登录环境的自动化终端里，若出现 `Failed to connect to bus`，可为命令设置 `XDG_RUNTIME_DIR=/run/user/$(id -u)` 和 `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus`。
+
+远程 VS Code 访问仍需 SSH 端口转发：在「端口」面板转发 `8765`，使用面板给出的本地地址打开。服务器服务常驻与浏览器侧转发是两件事；重新连接 SSH 后需恢复转发。[VS Code 官方说明](https://code.visualstudio.com/docs/remote/ssh#_forwarding-a-port-creating-ssh-tunnel)
+
 已实现：账号、公开/私有库、正文搜索、批量 Codex 迁移、上传预览、阅读、JSON/Markdown 导出、完整包下载、校验、去重、不可变版本历史、固定版本链接、Fork、网页编辑、整包更新、消息差异比较，以及公开贡献请求、双方评论、三方检查与候选审阅合并。
 
 后续平台工作：服务器草稿、图形冲突解决、许可与发布管理、粘贴和其他平台导入、站内通知与发现。当前还没有原生 Git push/clone 服务。

@@ -1,0 +1,23 @@
+# Install as a user unit. Set WorkingDirectory to your actual checkout path.
+[Unit]
+Description=ContextHub conversation library
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+WorkingDirectory=%h/ContextHub
+ExecStart=/usr/bin/python3 -m contexthub serve --data .context-data --host 127.0.0.1 --port 8765
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+Nice=10
+UMask=0077
+NoNewPrivileges=yes
+CPUAccounting=yes
+MemoryAccounting=yes
+
+[Install]
+WantedBy=default.target
