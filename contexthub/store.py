@@ -280,12 +280,12 @@ class Store:
         search = ' '.join([title, description] + [c['title'] + ' ' + ' '.join(m['content'] for m in c['messages']) for c in package['conversations']])
         return title, description, len(package['conversations']), search
 
-    def _create_package(self, db, owner, data, package, visibility, upstream=None):
+    def _create_package(self, db, owner, data, package, visibility, upstream=None, message=None):
         ident, version_id = uuid.uuid4().hex, uuid.uuid4().hex
         digest = self._save_blob(data)
         title, description, count, search = self._fields(package)
         now = datetime.now(timezone.utc).isoformat()
-        message = 'Fork 初始版本' if upstream else '初始版本'
+        message = message or ('Fork 初始版本' if upstream else '初始版本')
         parent = upstream['git_commit'] if upstream and visibility == 'public' else None
         commit = self._git_snapshot(ident, package, parent, message) if visibility == 'public' else None
         db.execute('''INSERT INTO packages
@@ -301,9 +301,13 @@ class Store:
         self._index_platforms(db, ident, package)
         return ident, version_id
 
-    def add_package(self, owner, data, visibility='private'):
+    def add_package(self, owner, data, visibility='private', message=None):
         if visibility not in ('private', 'public'):
             raise ValueError('visibility 必须为 private 或 public')
+        if message is not None:
+            if not isinstance(message, str) or not 1 <= len(message.strip()) <= 2000:
+                raise ValueError('请填写 1–2000 个字符的版本说明')
+            message = message.strip()
         package = read_package(data)
         digest = hashlib.sha256(data).hexdigest()
         with self.lock:
@@ -313,7 +317,7 @@ class Store:
                 if duplicate:
                     ident = duplicate['id']
                 else:
-                    ident, _ = self._create_package(db, owner, data, package, visibility)
+                    ident, _ = self._create_package(db, owner, data, package, visibility, message=message)
         if visibility == 'public':
             self._sync_git_ref(ident)
         return self.detail(ident, owner['id'])

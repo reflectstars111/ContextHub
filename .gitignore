@@ -6,3 +6,5 @@ __pycache__/
 .local-data/
 *.contextpack
 .artifacts/
+/build/
+/dist/

@@ -4,16 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "contexthub-conversations"
-version = "0.4.0"
+version = "0.5.0"
 description = "Portable AI conversations and a local Codex connector"
 requires-python = ">=3.12"
 dependencies = []
 
 [project.scripts]
 contexthub = "contexthub.__main__:main"
+ctx = "contexthub.ctx:main"
 
 [tool.setuptools.packages.find]
 include = ["contexthub*"]
 
 [tool.setuptools.package-data]
-contexthub = ["static/*.html", "static/*.js", "static/*.css"]
+contexthub = ["static/*.html", "static/*.js", "static/*.css", "CLI_LICENSE.txt"]

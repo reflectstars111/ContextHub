@@ -67,6 +67,33 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual(first["conversations"], second["conversations"])
         self.assertEqual(first, self.revise(first))
 
+    def test_canonical_snapshot_can_be_revalidated_against_same_base(self):
+        base = package()
+        for change in ('edit', 'add', 'remove', 'title'):
+            with self.subTest(change=change):
+                conversations = copy.deepcopy(base['conversations'])
+                title = base['library']['title']
+                if change == 'edit':
+                    conversations[0]['messages'][0]['content'] = 'Edited locally'
+                elif change == 'add':
+                    conversations.append(conversation('another'))
+                elif change == 'remove':
+                    conversations[0]['messages'].pop()
+                else:
+                    title = 'Renamed'
+                blob = self.revisions.build_revision(base, {'title': title, 'conversations': conversations})
+                canonical = read_package(blob)
+                repeated = self.revisions.build_revision(base, {
+                    'title': canonical['library']['title'],
+                    'description': canonical['library']['description'],
+                    'conversations': canonical['conversations']})
+                self.assertEqual(blob, repeated)
+        # The same property must hold once the base already has edit records.
+        later = self.revisions.build_revision(canonical, {'title': 'Another title',
+                                                        'conversations': canonical['conversations']})
+        self.assertEqual(later, self.revisions.build_revision(canonical, {
+            'title': 'Another title', 'conversations': read_package(later)['conversations']}))
+
     def test_additions_default_to_human_authored_and_imports_are_claims(self):
         base = package()
         snapshot = copy.deepcopy(base["conversations"])

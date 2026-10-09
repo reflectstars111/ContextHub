@@ -153,8 +153,13 @@ def build_revision(base_package, payload):
                         raise PackageError("message.transformations must be a list")
                     if "source_claimed" not in transformations:
                         transformations.append("source_claimed")
-        if annotations or "annotations" in conversation:
+        if annotations or (previous is not None and "annotations" in previous):
             conversation["annotations"] = annotations
+        else:
+            # A canonical submitted snapshot includes this revision's records.
+            # After removing those records, preserve the base representation
+            # of an absent/empty field so revalidation produces identical bytes.
+            conversation.pop("annotations", None)
     # Normalize before computing audit records: IDs and metadata have the same
     # representation as the resulting package, and malformed fields fail early.
     conversations = _normalize_conversations(conversations)

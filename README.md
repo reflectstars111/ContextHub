@@ -2,7 +2,25 @@
 
 > 一个面向 AI 对话的开源版本控制平台，让任何人的高质量 AI 对话都可以被保存、共享、复用、Fork 和持续演化。
 
-当前版本 **0.4.0**：增加 Claude、Claude Code、DeepSeek/dsh、ChatGPT 导出文件适配与平台分类；无法解析的文本可按原文存档。保留 Codex 迁移、版本、Fork、贡献合并与公网登录权限。
+当前版本 **0.5.0**：增加 Linux 终端工具 `ctx`，支持本地工作区、暂存、提交、推送、克隆、拉取和 Fork；保留多平台导入分类、Codex 迁移、网页版本管理与贡献合并。
+
+## 在终端管理对话：ctx
+
+面向 Linux / 远程服务器 / VS Code 终端，使用 Git 式工作流程。网站提供[单文件安装教程](https://contexthub.reflectstars.dev/cli)，只需 Python 3.12+，无需第三方 Python 包。
+
+```bash
+ctx auth login --username alice
+ctx init my-dialogues --title '我的对话库'
+cd my-dialogues
+ctx add ../conversation.contextpack
+ctx diff --staged
+ctx commit -m '整理第一批对话'
+ctx push
+```
+
+首次 push 默认私有。之后编辑受管 JSON，再 `ctx add .`、`ctx commit`、`ctx push`；另一台机器登录后可 `ctx clone '网站分享链接'`、`ctx pull`。复用别人的库用 `ctx fork`，Codex 本地桥接用 `ctx codex list/export/import`。工作区保留不可变提交，遇到分叉停止并保留本地内容。
+
+安装、登录配置、命令示例、冲突处理与首版边界见 [ctx 使用指南](docs/cli.md)，测试和上线证据见 [CLI 验证记录](docs/verification/2026-10-09-ctx-cli.md)。首版为单分支快照管理，clone 取得所选快照，尚无自动合并或 Git 协议兼容。
 
 ## 快速启动
 

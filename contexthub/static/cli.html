@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ctx 命令行工具 · ContextHub</title>
+  <link rel="stylesheet" href="/cli.css">
+</head>
+<body>
+  <header><a class="brand" href="/">ContextHub<span> / 终端工具</span></a><a href="/">返回对话库 ↗</a></header>
+  <main>
+    <section class="hero">
+      <p class="eyebrow">CONVERSATIONS, VERSIONED.</p>
+      <h1>在终端里，<br>让对话持续演化。</h1>
+      <p class="lead">用熟悉的 add、commit、push 和 pull，管理你的 AI 对话。<br>本地整理，提交留档，与 ContextHub 同步。</p>
+      <div class="actions"><a class="button" href="/ctx.pyz" download>下载 ctx · 0.5.0</a><a href="#install">Linux 安装方法 ↓</a></div>
+      <p class="note">Linux · Python 3.12+ · 无第三方 Python 依赖 · MIT 开源</p>
+    </section>
+    <div class="benefits"><article><span>01</span><h2>整理多种来源</h2><p>导入 Codex 对话包、Claude 和 DeepSeek 导出文件，在同一工作区管理。</p></article><article><span>02</span><h2>每次修改有记录</h2><p>先查看差异，再提交版本。提交保存在本机，运行 push 才会上传。</p></article><article><span>03</span><h2>跨机器继续整理</h2><p>克隆固定版本，拉取更新。发生分叉时停止同步，保留本地内容。</p></article></div>
+    <section id="install"><p class="eyebrow">GET STARTED</p><h2>一次安装，随时使用</h2><p>在 Linux 或 VS Code 远程终端中运行。先确认 <code>python3 --version</code> 为 3.12 或更新版本。</p>
+<pre><code>mkdir -p ~/.local/bin
+curl -fS https://contexthub.reflectstars.dev/ctx.pyz -o ctx.pyz
+curl -fS https://contexthub.reflectstars.dev/ctx.pyz.sha256 -o ctx.pyz.sha256
+sha256sum -c ctx.pyz.sha256
+install -m 755 ctx.pyz ~/.local/bin/ctx
+export PATH="$HOME/.local/bin:$PATH"
+ctx --version</code></pre>
+      <p class="note">可将 PATH 设置加入 ~/.bashrc。升级时重新下载、校验并安装；本地工作区和登录配置保留。ctx.pyz 是包含 Python 源码和 MIT 许可证的 ZIP，可直接查看源码。</p>
+    </section>
+    <section><h2>导入 → 提交 → 推送</h2><p>先在网站注册账号，再在终端登录。密码交互输入，登录会话按站点保存在用户配置目录。</p>
+<pre><code>ctx auth login --username 你的用户名
+ctx init my-dialogues --title "我的对话库"
+cd my-dialogues
+ctx add ../conversation.contextpack
+# 也可以：ctx add ../claude-export.json --platform claude
+ctx diff --staged
+ctx commit -m "整理第一批对话"
+ctx push</code></pre>
+      <p class="note">首次 push 默认创建私有库。明确要公开时，首次使用 ctx push --visibility public。存在转换遗漏或使用原文存档时，检查命令提示后再加 --confirm-import。</p>
+    </section>
+    <section><h2>修改与同步</h2><p>在 VS Code 中编辑 library.json 和 conversations/ 内的 JSON；添加外部文件仍使用 ctx add 文件名。</p>
+<pre><code>ctx status
+ctx diff
+ctx add .
+ctx diff --staged
+ctx commit -m "补充背景与回答"
+ctx push
+
+# 另一台机器：登录后粘贴网站的分享链接
+ctx clone 'https://contexthub.reflectstars.dev/?package=仓库ID' my-copy
+cd my-copy
+ctx pull</code></pre>
+      <p class="note">add . 只暂存受管的对话文件，不扫描项目。pull 要求本地干净且没有待推送提交；遇到双方都有新提交时，可另行 clone 最新版本后整理修改。首版不提供分支切换、自动合并或强制覆盖。clone 取得所选快照，log 记录此后本地的提交；网站可查看完整远程历史。</p>
+    </section>
+    <section><h2>复用别人的对话</h2><p>公开库可匿名阅读，所有克隆、下载与写操作均须登录。修改别人的库时，先创建自己的 Fork。</p>
+<pre><code>ctx fork 'https://contexthub.reflectstars.dev/?package=仓库ID' my-fork
+cd my-fork
+# 修改、add、commit 后，可 push 到自己的副本
+ctx remote
+ctx log
+ctx export ../shared.contextpack</code></pre>
+      <p class="note">Fork 默认私有，不改变原库。需要贡献回上游时，可创建公开 Fork，并在网站提交贡献请求。库的公开性创建后固定。</p>
+    </section>
+    <section><h2>连接本机 Codex</h2><p>安装 Codex CLI 后，可以直接使用 ctx 的本地桥接命令。</p>
+<pre><code>ctx codex list
+ctx codex export --thread 会话ID --title "项目讨论" -o codex.contextpack
+ctx add codex.contextpack
+
+# 下载并导出包后，在自己的机器检查，再导入
+ctx codex import shared.contextpack --dry-run
+ctx codex import shared.contextpack --cwd /absolute/path/to/project</code></pre>
+      <p class="note">导入会新建上下文会话，不调用模型。不恢复原始 UI 时间线、附件、工具执行状态、权限或项目文件。Claude、DeepSeek 的原平台回导不在首版支持范围。</p>
+    </section>
+    <footer><p>更多选项：<code>ctx --help</code> · 脚本输出：<code>ctx --json status</code></p><p>自部署站点：登录和首次 push 使用 <code>--hub https://你的Hub</code>，或设置 <code>CONTEXTHUB_HUB</code>。</p><a href="/">回到 ContextHub →</a></footer>
+  </main>
+</body>
+</html>

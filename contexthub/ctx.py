@@ -1,0 +1,442 @@
+"""Git-style local conversation workspaces and authenticated Hub transfer.
+
+Only explicitly imported conversations and managed workspace JSON are staged.
+No command scans an enclosing project or the user's native conversation store.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import re
+import sys
+import urllib.parse
+from pathlib import Path
+
+from . import __version__
+from .hub_client import HubClient, HubClientError, normalize_hub
+from .importers import import_upload
+from .package import MAX_ARCHIVE_BYTES, MAX_CONVERSATIONS, MAX_TOTAL_BYTES, build_package, read_package
+from .workspace import Workspace
+
+
+DEFAULT_HUB = 'https://contexthub.reflectstars.dev'
+_IDENTIFIER = re.compile(r'[A-Za-z0-9_-]{1,128}\Z')
+
+
+def parser():
+    root = argparse.ArgumentParser(prog='ctx', description='在终端管理、提交和同步 AI 对话库')
+    root.add_argument('--version', action='version', version=f'ContextHub {__version__}')
+    root.add_argument('--json', action='store_true', help='输出供脚本使用的 JSON（也可放在子命令之后）')
+    sub = root.add_subparsers(dest='action', required=True)
+    auth = sub.add_parser('auth', help='保存或清除 Hub 登录会话').add_subparsers(dest='auth_action', required=True)
+    for action, help_text in (('login', '登录并保存会话'), ('status', '检查当前账号'), ('logout', '退出并清除本机会话')):
+        command = auth.add_parser(action, help=help_text)
+        command.add_argument('--hub', help='Hub 地址，默认 CONTEXTHUB_HUB 或官方站点')
+        if action == 'login':
+            command.add_argument('--username', required=True)
+            command.add_argument('--password-stdin', action='store_true', help='从标准输入读取一行密码')
+    command = sub.add_parser('init', help='初始化本地对话库')
+    command.add_argument('directory', nargs='?', default='.')
+    command.add_argument('--title', default='我的对话库')
+    command.add_argument('--description', default='')
+    command = sub.add_parser('inspect', help='预览指定导出文件的对话摘要和导入提示，不保存或上传')
+    command.add_argument('file')
+    command.add_argument('--platform', choices=('auto', 'codex', 'chatgpt', 'claude', 'deepseek', 'other'), default='auto')
+    command.add_argument('--mode', choices=('normalize', 'archive'), default='normalize')
+    command = sub.add_parser('add', help='导入指定文件；add . 暂存受管 JSON 的修改')
+    command.add_argument('files', nargs='+')
+    command.add_argument('--platform', choices=('auto', 'codex', 'chatgpt', 'claude', 'deepseek', 'other'), default='auto')
+    command.add_argument('--mode', choices=('normalize', 'archive'), default='normalize')
+    command.add_argument('--confirm-import', action='store_true', help='接受导入报告中的遗漏或原文存档提示')
+    command.add_argument('--replace', action='store_true', help='允许替换相同 ID 的对话')
+    sub.add_parser('status', help='查看暂存、未暂存修改和待推送提交')
+    command = sub.add_parser('diff', help='查看对话内容差异')
+    command.add_argument('--staged', action='store_true', help='比较暂存区与上次提交')
+    command = sub.add_parser('commit', help='保存暂存区为不可变的本地版本')
+    command.add_argument('-m', '--message', required=True)
+    sub.add_parser('log', help='查看本地提交记录')
+    command = sub.add_parser('clone', help='下载仓库或网页分享链接为本地对话库（需要登录）')
+    command.add_argument('repository')
+    command.add_argument('directory', nargs='?')
+    command.add_argument('--hub')
+    command.add_argument('--version', help='克隆指定的 Hub 历史版本')
+    command = sub.add_parser('fork', help='Fork 为自己的仓库并下载到新目录')
+    command.add_argument('repository')
+    command.add_argument('directory', nargs='?')
+    command.add_argument('--hub')
+    command.add_argument('--version', help='Fork 指定的 Hub 历史版本')
+    command.add_argument('--visibility', choices=('private', 'public'), default='private')
+    command = sub.add_parser('push', help='按顺序推送本地提交；首次默认创建私有库')
+    command.add_argument('--hub')
+    command.add_argument('--visibility', choices=('private', 'public'))
+    sub.add_parser('pull', help='工作目录干净且无待推送提交时，拉取 Hub 最新版本')
+    sub.add_parser('remote', help='显示当前绑定的 Hub 仓库')
+    command = sub.add_parser('export', help='导出已提交版本，可供 contexthub import 使用')
+    command.add_argument('output')
+    command = sub.add_parser('codex', help='使用本机 Codex 对话桥接：list、export、import')
+    command.add_argument('codex_args', nargs=argparse.REMAINDER, help='list / export / import 及其原有参数')
+    return root
+
+
+def _hub(explicit=None):
+    return normalize_hub(explicit or os.environ.get('CONTEXTHUB_HUB') or DEFAULT_HUB)
+
+
+def _identifier(value, label):
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
+        raise ValueError(f'{label} 必须是有效的 Hub ID')
+    return value
+
+
+def clone_reference(value, hub=None, version=None):
+    """Parse only exact Hub share URLs, never treating URL secrets as auth."""
+    if '://' not in value:
+        return _hub(hub), _identifier(value, '仓库'), _identifier(version, '版本') if version else None
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('分享链接不能包含控制字符')
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.username is not None or parsed.password is not None or parsed.fragment or parsed.path not in ('', '/'):
+        raise ValueError('请使用不含账号、密码或令牌的 Hub 网页分享链接（/?package=ID）')
+    origin = normalize_hub(urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, '', '', '')))
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+    if set(query) - {'package', 'version'} or len(query.get('package', [])) != 1 or any(len(items) != 1 for items in query.values()):
+        raise ValueError('分享链接只支持 package 和可选的 version 参数')
+    ident = _identifier(query['package'][0], '仓库')
+    linked_version = _identifier(query['version'][0], '版本') if 'version' in query else None
+    if hub and _hub(hub) != origin:
+        raise ValueError('--hub 与分享链接的站点不同，请明确选择同一个 Hub')
+    if version and linked_version and version != linked_version:
+        raise ValueError('--version 与分享链接指定的版本不同')
+    return origin, ident, _identifier(version, '版本') if version else linked_version
+
+
+def _require_user(client):
+    session = client.session()
+    if not session.get('user'):
+        raise HubClientError(401, f'请先登录：ctx auth login --hub {client.origin} --username 用户名')
+    return session
+
+
+def _clean(status, *, pull=False):
+    if status.get('modified') or status.get('staged'):
+        raise ValueError('工作目录有未提交修改；请先检查 ctx diff、ctx add . 和 ctx commit -m "说明"')
+    if pull and status['ahead']:
+        raise ValueError('本地有待推送提交，pull 不会覆盖它们；请先推送，若已分叉可另行 clone 最新版本后整理修改')
+
+
+def _remote_result(origin, detail, blob, local_commit=None):
+    try:
+        version = detail['version']
+        ident = _identifier(detail['id'], '仓库')
+        version_id = _identifier(version['id'], '版本')
+        visibility = detail['visibility']
+        digest = version['sha256']
+    except (KeyError, TypeError) as exc:
+        raise ValueError('Hub 返回了不完整的版本信息；本地同步记录未更新') from exc
+    if visibility not in ('private', 'public') or hashlib.sha256(blob).hexdigest() != digest:
+        raise ValueError('Hub 版本与传输内容不一致；本地同步记录未更新')
+    result = {'url': origin, 'package_id': ident, 'version_id': version_id, 'visibility': visibility}
+    if local_commit is not None:
+        result['local_commit'] = local_commit
+    return result
+
+
+def _selected_version(detail):
+    if not isinstance(detail, dict) or not isinstance(detail.get('version'), dict):
+        raise ValueError('Hub 返回了不完整的版本信息')
+    return _identifier(detail['version'].get('id'), '版本')
+
+
+def _import_files(args):
+    if len(args.files) > MAX_CONVERSATIONS:
+        raise ValueError(f'一次最多选择 {MAX_CONVERSATIONS} 个文件')
+    conversations, reports = {}, []
+    total_read = total_normalized = 0
+    single_blob = None
+    for name in args.files:
+        path = Path(name)
+        if not path.is_file():
+            raise ValueError(f'请选择具体的普通文件：{name}；ctx add . 只暂存受管对话，不会扫描项目')
+        with path.open('rb') as stream:
+            raw = stream.read(MAX_ARCHIVE_BYTES + 1)
+        total_read += len(raw)
+        if total_read > MAX_ARCHIVE_BYTES:
+            raise ValueError('所选文件总大小超过迁移包上限，请分批导入')
+        blob, package, report = import_upload(raw, filename=path.name, platform=args.platform, mode=args.mode)
+        if report['requires_confirmation'] and not args.confirm_import:
+            warning = '; '.join(report['warnings'])[:2000]
+            import shlex
+            preview = f'ctx inspect {shlex.quote(str(path))} --platform {args.platform} --mode {args.mode}'
+            raise ValueError(f'{path.name} 需要确认：{warning}\n请先使用 {preview} 检查，接受提示后添加 --confirm-import')
+        single_blob = blob
+        reports.append({'file': str(path), 'import_report': report})
+        for conversation in package['conversations']:
+            total_normalized += len(json.dumps(conversation, ensure_ascii=False).encode('utf-8'))
+            if total_normalized > MAX_TOTAL_BYTES:
+                raise ValueError('导入内容总大小超过迁移包上限，请分批导入')
+            ident = conversation['id']
+            if ident in conversations and conversations[ident] != conversation and not args.replace:
+                raise ValueError(f'所选文件包含不同内容的相同对话 ID：{ident}；确认替换后添加 --replace')
+            conversations[ident] = conversation
+    if len(args.files) == 1:
+        return single_blob, reports
+    return build_package(list(conversations.values()), '导入的对话'), reports
+
+
+def _clone(args):
+    origin, ident, version = clone_reference(args.repository, args.hub, args.version)
+    destination = Path(args.directory or f"{'fork' if args.action == 'fork' else 'hub'}-{ident[:12]}")
+    if destination.is_symlink() or (destination.exists() and (not destination.is_dir() or any(destination.iterdir()))):
+        raise ValueError('clone 目标必须是不存在的路径或空目录；现有文件不会被覆盖')
+    client = HubClient(origin)
+    _require_user(client)
+    detail = client.detail(ident, version)
+    selected = _selected_version(detail)
+    if detail.get('id') != ident or (version and selected != version):
+        raise ValueError('Hub 返回了不同的仓库或版本；未创建本地对话库')
+    if args.action == 'fork':
+        detail = client.fork(ident, selected, visibility=args.visibility)
+        ident = _identifier(detail.get('id'), '仓库')
+        selected = _selected_version(detail)
+        version = selected
+    blob = client.download(ident, selected)
+    package = read_package(blob)
+    remote = _remote_result(origin, detail, blob)
+    if remote['package_id'] != ident or (version and remote['version_id'] != version):
+        raise ValueError('Hub 返回了不同的仓库或版本；未创建本地对话库')
+    ws = Workspace.init(destination, package['library']['title'], package['library'].get('description', ''))
+    ws.checkout_remote(blob, remote, expected_head=None)
+    return {'directory': str(ws.root), 'remote': ws.remote, 'status': ws.status()}
+
+
+def _push(ws, args):
+    with ws.locked():
+        status = ws.status()
+        _clean(status)
+        original_head = ws.head
+        if original_head is None:
+            raise ValueError('还没有提交；请先 ctx add 文件，再 ctx commit -m "说明"')
+        remote = ws.remote
+        origin = normalize_hub(remote['url']) if remote else _hub(args.hub)
+        if remote and args.hub and _hub(args.hub) != origin:
+            raise ValueError('当前目录已绑定其他 Hub；不能用 --hub 更换同步目标')
+        if remote and args.visibility and args.visibility != remote['visibility']:
+            raise ValueError('当前版本的 ctx push 不能更改已绑定仓库的公开性')
+        pending = ws.pending_commits()
+        if not pending:
+            return {'pushed': 0, 'remote': remote}
+        client = HubClient(origin)
+        _require_user(client)
+        pushed = 0
+        for commit in pending:
+            blob = ws.package_bytes(commit['id'])
+            if remote is None:
+                detail = client.upload(blob, visibility=args.visibility or 'private', message=commit['message'])
+            else:
+                try:
+                    detail = client.push(remote['package_id'], blob, base_version=remote['version_id'], message=commit['message'])
+                except HubClientError as exc:
+                    if exc.status == 404:
+                        raise HubClientError(404, str(exc) + '；只有仓库所有者可以推送。请确认登录账号，或用 ctx fork 将对话库复制到自己名下。') from exc
+                    raise
+            updated = _remote_result(origin, detail, blob, commit['id'])
+            if remote and updated['package_id'] != remote['package_id']:
+                raise ValueError('Hub 返回了不同的仓库；本地同步记录未更新')
+            ws.mark_pushed(updated, expected_head=original_head)
+            remote = ws.remote
+            pushed += 1
+        return {'pushed': pushed, 'remote': remote}
+
+
+def _pull(ws):
+    with ws.locked():
+        status = ws.status()
+        _clean(status, pull=True)
+        remote = ws.remote
+        if remote is None:
+            raise ValueError('尚未绑定远程仓库；请先 ctx push，或用 ctx clone 下载仓库')
+        client = HubClient(remote['url'])
+        _require_user(client)
+        detail = client.detail(remote['package_id'])
+        selected = _selected_version(detail)
+        if selected == remote['version_id']:
+            return {'updated': False, 'remote': remote}
+        head = ws.head
+        blob = client.download(remote['package_id'], selected)
+        read_package(blob)
+        updated = _remote_result(client.origin, detail, blob)
+        if updated['package_id'] != remote['package_id']:
+            raise ValueError('Hub 返回了不同的仓库；本地内容未更新')
+        ws.checkout_remote(blob, updated, expected_head=head)
+        return {'updated': True, 'remote': ws.remote, 'status': ws.status()}
+
+
+def run(args):
+    if args.action == 'auth':
+        client = HubClient(_hub(args.hub))
+        if args.auth_action == 'login':
+            password = sys.stdin.readline().rstrip('\r\n') if args.password_stdin else getpass.getpass('ContextHub 密码: ')
+            if not password:
+                raise ValueError('密码不能为空')
+            return client.login(args.username, password)
+        return client.logout() if args.auth_action == 'logout' else client.session()
+    if args.action == 'inspect':
+        path = Path(args.file)
+        if not path.is_file():
+            raise ValueError('请选择一个普通文件进行检查')
+        with path.open('rb') as stream:
+            raw = stream.read(MAX_ARCHIVE_BYTES + 1)
+        _, package, report = import_upload(raw, filename=path.name, platform=args.platform, mode=args.mode)
+        return {'file': str(path), 'title': package['library']['title'],
+                'description': package['library'].get('description', ''),
+                'conversation_count': len(package['conversations']), 'platforms': report['platforms'],
+                'conversations': [{'id': conversation['id'], 'title': conversation['title'],
+                                   'message_count': len(conversation['messages'])}
+                                  for conversation in package['conversations']],
+                'compatibility': package['compatibility'], 'import_report': report}
+    if args.action == 'init':
+        ws = Workspace.init(Path(args.directory), args.title, args.description)
+        return {'directory': str(ws.root), 'status': ws.status()}
+    if args.action in ('clone', 'fork'):
+        return _clone(args)
+    ws = Workspace.find(Path.cwd())
+    if args.action == 'add':
+        if args.files == ['.']:
+            ws.stage()
+            return {'status': ws.status(), 'imports': []}
+        if '.' in args.files:
+            raise ValueError('ctx add . 请单独运行；导入新文件时逐个指定文件路径')
+        blob, reports = _import_files(args)
+        ws.add(blob, replace=args.replace)
+        return {'status': ws.status(), 'imports': reports}
+    if args.action == 'status':
+        return ws.status()
+    if args.action == 'diff':
+        return ws.diff(staged=args.staged)
+    if args.action == 'commit':
+        return ws.commit(args.message)
+    if args.action == 'log':
+        return {'commits': ws.log()}
+    if args.action == 'remote':
+        return {'remote': ws.remote}
+    if args.action == 'push':
+        return _push(ws, args)
+    if args.action == 'pull':
+        return _pull(ws)
+    if args.action == 'export':
+        blob = ws.package_bytes()
+        path = Path(args.output)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'wb') as stream:
+            stream.write(blob)
+        return {'output': str(path.resolve()), 'commit': ws.head, 'bytes': len(blob)}
+    raise ValueError('未知命令')
+
+
+def _safe(value):
+    return ''.join(char if (ord(char) >= 32 and ord(char) != 127) or char in '\n\t' else f'\\x{ord(char):02x}' for char in str(value))
+
+
+def _print_status(value):
+    print(f"提交：{(value.get('head') or '尚无提交')[:16]}；对话：{value['conversations']}；待推送：{value['ahead']}")
+    print(f"暂存修改：{'有' if value['staged'] else '无'}；未暂存修改：{'有' if value['modified'] else '无'}")
+    if value.get('error'):
+        print(_safe(value['error']))
+    remote = value.get('remote')
+    print(_safe(f"远程：{remote['url']}/?package={remote['package_id']}" if remote else '远程：未绑定（首次 push 默认创建私有库）'))
+
+
+def _display(args, value):
+    if args.json:
+        print(json.dumps(value, ensure_ascii=False, indent=2))
+    elif args.action == 'auth':
+        user = value.get('user')
+        print(_safe(f"{value.get('hub', _hub(args.hub))}：已登录 {user['username']}" if user else '已退出登录' if args.auth_action == 'logout' else '尚未登录；使用 ctx auth login --username 用户名'))
+    elif args.action == 'inspect':
+        print(_safe(f"{value['title']}：{value['conversation_count']} 段对话；来源：{', '.join(value['platforms'])}"))
+        for conversation in value['conversations']:
+            print(_safe(f"  {conversation['title']}（{conversation['message_count']} 条消息）"))
+        warnings = list(dict.fromkeys(value['import_report'].get('warnings', []) + value['compatibility'].get('warnings', [])))
+        for warning in warnings:
+            print(_safe(f'提示：{warning}'))
+        if value['import_report']['requires_confirmation']:
+            print('接受这些提示后，可在 ctx add 时添加 --confirm-import。')
+    elif args.action in ('status', 'init', 'add', 'clone', 'fork'):
+        if 'directory' in value:
+            print(_safe(f"本地对话库：{value['directory']}"))
+        for item in value.get('imports', []):
+            print(_safe(f"已导入：{item['file']}"))
+            for warning in item['import_report'].get('warnings', []):
+                print(_safe(f'导入提示：{warning}'))
+        _print_status(value.get('status', value))
+    elif args.action == 'commit':
+        print(_safe(f"已提交 {value['id'][:12]}  {value['message']}"))
+    elif args.action == 'log':
+        if not value['commits']:
+            print('尚无提交')
+        for commit in value['commits']:
+            print(_safe(f"{commit['id'][:12]}  {commit['created_at']}  {commit['message']}"))
+    elif args.action == 'diff':
+        summary = value['summary']
+        print(f"对话：新增 {summary['conversations_added']}，删除 {summary['conversations_removed']}，修改 {summary['conversations_modified']}")
+        print(f"消息：新增 {summary['messages_added']}，删除 {summary['messages_removed']}，修改 {summary['messages_modified']}，移动 {summary['messages_reordered']}")
+        for change in value.get('library_changes', []):
+            print(_safe(f"库信息 {change['field']}：{change['before']} → {change['after']}"))
+        for change in value.get('changes', []):
+            print(_safe(f"\n{change['kind']}  {change['title']} ({change['conversation_id']})"))
+            for metadata in change.get('metadata', []):
+                print(_safe(f"  {metadata['field']}：{metadata['before']} → {metadata['after']}"))
+            for message in change.get('messages', []):
+                for marker, key in (('-', 'before'), ('+', 'after')):
+                    if message.get(key):
+                        print(_safe(f"{marker} [{message[key]['role']}] " + message[key]['content'].replace('\n', '\n' + marker + ' ')))
+        if value.get('truncated'):
+            print('差异内容较长，显示已截断；完整内容保存在受管 JSON 文件中。')
+    elif args.action == 'export':
+        print(_safe(f"已导出提交 {value['commit'][:12]}：{value['output']}"))
+    else:
+        if args.action == 'push':
+            print(f"已推送 {value['pushed']} 个提交" if value['pushed'] else '没有待推送提交')
+        elif args.action == 'pull':
+            print('已拉取最新版本' if value['updated'] else '已是最新版本')
+        remote = value.get('remote')
+        print(_safe(f"{remote['url']}/?package={remote['package_id']}\n远程版本：{remote['version_id']}（{remote['visibility']}）" if remote else '尚未绑定远程仓库'))
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # A truly global output switch is convenient for shell aliases and scripts.
+    as_json = '--json' in argv
+    args = parser().parse_args([item for item in argv if item != '--json'])
+    args.json = as_json
+    try:
+        if args.action == 'codex':
+            if not args.codex_args or args.codex_args[0] not in ('list', 'export', 'import'):
+                raise ValueError('ctx codex 支持 list、export、import；例如 ctx codex export --help')
+            from .__main__ import main as transfer_main
+            return transfer_main(args.codex_args)
+        result = run(args)
+        _display(args, result)
+        return 0
+    except KeyboardInterrupt:
+        return 130
+    except (ValueError, OSError, HubClientError) as exc:
+        message = str(exc)
+        status = getattr(exc, 'status', None)
+        if status == 401 and 'ctx auth login' not in message:
+            message += '\n登录已失效或尚未登录，请使用 ctx auth login --hub 目标站点 --username 用户名'
+        if status == 409:
+            message += '\n远程版本已更新；本地内容保留，请在新目录 clone 最新版本后整理修改。'
+        if as_json:
+            print(json.dumps({'error': message, **({'status': status} if status else {})}, ensure_ascii=False), file=sys.stderr)
+        else:
+            print('错误：' + _safe(message), file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

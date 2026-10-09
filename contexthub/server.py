@@ -378,7 +378,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {'error': f'操作未完成（{type(exc).__name__}），请查看终端诊断或稍后重试'})
 
     def _static(self, path):
-        allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/contributions.js': 'contributions.js', '/style.css': 'style.css'}
+        if path in ('/ctx.pyz', '/ctx.pyz.sha256'):
+            from .distribution import cli_archive, cli_checksum
+            if path.endswith('.sha256'):
+                return self._send(200, cli_checksum().encode(), 'text/plain; charset=utf-8')
+            return self._send(200, cli_archive(), 'application/octet-stream',
+                              {'Content-Disposition': 'attachment; filename="ctx.pyz"'})
+        allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/contributions.js': 'contributions.js', '/style.css': 'style.css', '/cli': 'cli.html', '/cli.css': 'cli.css'}
         if path not in allowed:
             raise HTTPError(404, '未找到页面')
         file = STATIC / allowed[path]
@@ -436,7 +442,10 @@ class Handler(BaseHTTPRequestHandler):
                 blob, _, report = self._import_upload(query)
                 if report['requires_confirmation'] and query.get('confirm_import') != ['1']:
                     raise ValueError('请先预览并确认导入提示；接受遗漏或原文存档后再上传（confirm_import=1）')
-                result = store.add_package(session['user'], blob, query.get('visibility', ['private'])[0])
+                messages = query.get('message', [None])
+                if len(messages) != 1:
+                    raise ValueError('message 参数不能重复')
+                result = store.add_package(session['user'], blob, query.get('visibility', ['private'])[0], messages[0])
                 return self._send(201, {**result, 'import_report': report})
         parts = path.strip('/').split('/')
         if len(parts) in (3, 4) and parts[:2] == ['api', 'packages']:
@@ -481,6 +490,33 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(version_id, str) or not version_id:
                         raise ValueError('请选择要 Fork 的固定版本')
                     return self._send(201, store.fork_package(ident, session['user'], version_id, data.get('visibility', 'private')))
+                if method == 'POST' and action == 'push':
+                    current = store.get(ident, user_id)
+                    if current['owner_id'] != user_id:
+                        raise FileNotFoundError('对话库不存在或无权修改')
+                    for key in ('base_version', 'message'):
+                        if len(query.get(key, [])) != 1 or not query[key][0].strip():
+                            raise ValueError(f'需要唯一且非空的 {key} 参数')
+                    base_id, message = query['base_version'][0], query['message'][0].strip()
+                    if len(message) > 2000:
+                        raise ValueError('保存说明需为 1–2,000 个字符')
+                    base = read_package(store.download(ident, user_id, version_id=base_id))
+                    submitted = self._body()
+                    candidate = read_package(submitted)
+                    canonical = build_revision(base, {
+                        'title': candidate['library']['title'],
+                        'description': candidate['library']['description'],
+                        'conversations': candidate['conversations']})
+                    checked = read_package(canonical)
+                    fields = ('library', 'conversations', 'compatibility')
+                    # ZIP compression/entry order can vary across machines.
+                    # Validate every semantic field, then retain the original
+                    # validated bytes so client object hashes remain portable.
+                    if any(checked[field] != candidate[field] for field in fields):
+                        raise ValueError('本地快照的编辑记录与基准版本不一致，请使用最新 ctx 工具重新提交')
+                    if all(base[field] == candidate[field] for field in fields):
+                        raise ValueError('内容没有变化，无需创建新版本')
+                    return self._send(201, store.add_version(ident, session['user'], submitted, base_id, message))
                 if method == 'POST' and action in ('versions', 'preview'):
                     current = store.get(ident, user_id)
                     if current['owner_id'] != user_id:
