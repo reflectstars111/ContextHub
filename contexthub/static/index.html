@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>ContextHub · 对话随行</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="/" aria-label="ContextHub 首页"><span class="brand-mark" aria-hidden="true">c<span>h</span></span><span>ContextHub<small>让上下文继续发生</small></span></a>
+      <div class="mode-label"><span class="status-dot"></span><span id="mode-label">正在连接服务</span></div>
+      <nav class="nav-list" id="nav-list"></nav>
+      <div class="sidebar-bottom"><span class="tiny-label">KEEP THE CONTEXT</span><p>留下思考的来路，<br>带走完整的上下文。</p><div class="local-note" id="boundary-note">正在读取服务配置…</div></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><div class="breadcrumb"><span>工作空间</span><span class="breadcrumb-slash">/</span><strong id="breadcrumb">对话库</strong></div><div class="topbar-actions"><span class="account-name" id="account-name"></span><button class="button button-quiet" id="account-button" hidden>登录 / 注册</button></div></header>
+      <main id="main-content">
+        <div id="status" class="notice status-message" role="status" aria-live="polite" hidden></div>
+        <section id="library-view" class="view" hidden aria-labelledby="library-title">
+          <div class="page-heading"><div><span class="eyebrow">YOUR CONVERSATION LIBRARY</span><h1 id="library-title">每段对话，都有下一站。</h1><p>收藏、分享与迁移 AI 对话，让有价值的上下文延续下去。</p></div><button class="button button-primary" id="open-upload"><span aria-hidden="true">＋</span> 上传对话包</button></div>
+          <div class="intro-banner"><div class="banner-symbol" aria-hidden="true">↗</div><div><h2>把一次对话，变成可带走的知识</h2><p>使用本地连接器导出 Codex 对话，在这里保存、阅读并下载完整的 .contextpack。</p></div><span class="pill">开放格式 · 你的内容</span></div>
+          <div class="section-toolbar"><div><h2>对话库 <span class="count-label" id="package-count"></span></h2><p class="subtle">公开对话，以及登录后仅你可见的私有对话</p></div><form id="search-form" class="search-box" role="search"><label class="sr-only" for="search-input">搜索对话包</label><span aria-hidden="true">⌕</span><input id="search-input" name="q" placeholder="搜索标题、描述…" autocomplete="off"><button type="submit" class="search-submit">搜索</button></form></div>
+          <div id="package-grid" class="package-grid"></div>
+        </section>
+        <section id="local-view" class="view" hidden aria-labelledby="local-title">
+          <div class="page-heading"><div><span class="eyebrow">LOCAL CODEX CONNECTOR</span><h1 id="local-title">选择对话，带走上下文。</h1><p>读取此电脑上的 Codex 会话，预览、编辑脱敏，再导出为对话包。</p></div><button class="button button-secondary" id="refresh-local">刷新会话</button></div>
+          <div class="intro-banner"><div class="banner-symbol" aria-hidden="true">⌘</div><div><h2>由你决定哪些内容离开本机</h2><p>预览和导出均在本地进行，不调用模型。只有你手动上传的对话包才会发送到 Hub。</p></div><span class="pill">本地连接</span></div>
+          <div class="section-toolbar"><div><h2>本地会话 <span class="count-label" id="session-count"></span></h2><div class="filter-row"><label><input type="checkbox" id="include-archived"> 包含已归档</label><label><input type="checkbox" id="include-subagents"> 包含子代理</label></div></div><button class="button button-primary" id="preview-selected" disabled>预览所选对话</button></div>
+          <div class="table-container"><table class="session-table"><thead><tr><th class="check-column"><input type="checkbox" id="select-all" aria-label="选择全部会话"></th><th>对话</th><th class="session-date">最近更新</th><th>来源</th></tr></thead><tbody id="session-rows"></tbody></table><div id="session-empty" class="empty-state" hidden></div></div>
+          <p class="footnote" id="selection-note">选择会话后即可预览，原始会话不会被修改。</p>
+        </section>
+        <section id="import-view" class="view" hidden aria-labelledby="import-title">
+          <div class="page-heading"><div><span class="eyebrow">RESTORE YOUR CONTEXT</span><h1 id="import-title">让对话在这里继续。</h1><p>先检查对话包，再将它导入为新的本地 Codex 会话。</p></div></div>
+          <div class="import-grid"><div class="panel"><div class="step-label">01 · 检查对话包</div><h2>选择 .contextpack</h2><p class="subtle">检查内容与兼容性报告后，再确认导入。</p><label class="file-picker" for="import-file"><span class="file-icon" aria-hidden="true">↥</span><strong>选择对话包</strong><span>.contextpack 或 .zip</span><input type="file" id="import-file" accept=".contextpack,.zip,application/zip"></label><p id="import-file-info" class="file-info">尚未选择文件</p><button class="button button-secondary full-width" id="inspect-package" disabled>检查并预览</button></div><div class="panel"><div class="step-label">02 · 设置导入位置</div><h2>创建新的 Codex 会话</h2><p class="subtle">导入会创建新的会话 ID，不覆盖原始记录，也不会自动调用模型。</p><label class="field-label" for="import-cwd">目标工作目录 <span class="required">必填</span></label><input id="import-cwd" class="text-input" placeholder="例如 /home/you/projects/my-project" autocomplete="off"><p class="field-help">请填写这台电脑上已存在的绝对目录。</p><button class="button button-primary full-width" id="import-confirm" disabled>确认导入为新会话</button><p class="footnote">内容恢复与 Codex 原生界面中的呈现可能不同；以导入回执中的兼容性说明为准。</p></div></div>
+          <div id="inspect-result" hidden></div><div id="import-receipt" hidden></div>
+        </section>
+        <section id="reader-view" class="view" hidden aria-labelledby="reader-title">
+          <button class="back-button" id="reader-back">← 返回对话库</button><div class="reader-heading"><div><div class="eyebrow" id="reader-eyebrow">CONVERSATION</div><h1 id="reader-title"></h1><p id="reader-description"></p><div class="metadata-row" id="reader-metadata"></div></div><div class="reader-primary-actions"><button class="button button-primary" id="download-package">下载完整对话包</button><button class="button button-danger-quiet" id="delete-package" hidden>删除</button></div></div>
+          <div id="reader-warnings" hidden></div><div id="export-options" class="panel export-options" hidden><div><label class="field-label" for="export-title">对话包标题</label><input class="text-input" id="export-title" maxlength="200" placeholder="为这些对话取一个名字"></div><div><label class="field-label" for="export-description">简短描述</label><input class="text-input" id="export-description" maxlength="2000" placeholder="这些上下文适合在什么时候使用"></div><label class="redact-option"><input id="redact-secrets" type="checkbox" checked> 自动脱敏常见凭据</label><p class="field-help">导出前请检查正文。自动脱敏无法识别所有敏感信息，你可以逐条编辑或移除消息。</p></div>
+          <div class="reader-layout"><aside class="conversation-sidebar"><div class="tiny-label">包内对话</div><div id="conversation-tabs" class="conversation-tabs"></div><div class="reader-note">来源与编辑记录会随对话保留。未知或未支持的内容会在兼容性报告中注明。</div></aside><article class="conversation-content"><div class="conversation-toolbar"><h2 id="conversation-title"></h2><div class="copy-actions"><label class="sr-only" for="copy-format">导出格式</label><select id="copy-format"><option value="markdown">Markdown</option><option value="json">JSON</option></select><button class="button button-small" id="copy-conversation">复制</button><button class="button button-small" id="save-conversation">保存</button></div></div><div id="conversation-provenance"></div><div id="messages" class="messages"></div></article></div>
+        </section>
+        <section id="loading-view" class="view"><div class="empty-state"><span class="loading-ring" aria-hidden="true"></span><h2>正在连接 ContextHub</h2><p>读取工作空间与服务配置…</p></div></section>
+      </main>
+      <footer class="workspace-footer"><span>ContextHub</span><span>对话有出处 · 编辑有记录 · 迁移由你决定</span></footer>
+    </div>
+  </div>
+  <dialog id="auth-dialog" aria-labelledby="auth-title"><form id="auth-form" class="dialog-body"><button type="button" class="dialog-close" data-close="auth-dialog" aria-label="关闭">×</button><span class="eyebrow">YOUR CONTEXT, TOGETHER</span><h2 id="auth-title">欢迎回来</h2><p id="auth-description" class="subtle">登录后上传、管理你的对话包。</p><div class="segmented-control"><button type="button" id="login-tab" class="active">登录</button><button type="button" id="register-tab">注册</button></div><label class="field-label" for="username">用户名</label><input id="username" class="text-input" name="username" autocomplete="username" required minlength="3" maxlength="64"><label class="field-label" for="password">密码</label><input id="password" class="text-input" name="password" type="password" autocomplete="current-password" required><p id="auth-error" class="inline-error" role="alert" hidden></p><button type="submit" id="auth-submit" class="button button-primary full-width">登录</button></form></dialog>
+  <dialog id="upload-dialog" aria-labelledby="upload-title"><form id="upload-form" class="dialog-body"><button type="button" class="dialog-close" data-close="upload-dialog" aria-label="关闭">×</button><span class="eyebrow">ADD TO YOUR LIBRARY</span><h2 id="upload-title">上传对话包</h2><p class="subtle">上传本地连接器导出的 .contextpack，保留对话内容与来源记录。</p><label class="file-picker" for="upload-file"><span class="file-icon" aria-hidden="true">↥</span><strong>点击选择对话包</strong><span>.contextpack 或 .zip</span><input type="file" id="upload-file" accept=".contextpack,.zip,application/zip" required></label><div id="upload-file-info" class="file-info">尚未选择文件</div><fieldset class="visibility-options"><legend>谁可以看到这个对话包？</legend><label><input type="radio" name="visibility" value="private" checked><span><strong>仅自己</strong><small>私有保存，登录后仅你可见</small></span></label><label><input type="radio" name="visibility" value="public"><span><strong>公开分享</strong><small>任何访问这个 Hub 的人均可阅读和下载</small></span></label></fieldset><p class="field-help">选择文件后会发送到服务器检查，但不会保存。请展开预览检查内容，确认没有敏感信息后再上传。</p><div id="upload-preview" hidden></div><p id="upload-error" class="inline-error" role="alert" hidden></p><button type="submit" id="upload-submit" class="button button-primary full-width" disabled>上传为私有对话包</button></form></dialog>
+</body>
+</html>
