@@ -119,6 +119,8 @@ class WindowsInstallerTests(unittest.TestCase):
 
     def test_locked_existing_launcher_rolls_back_archive(self):
         self.install()
+        previous_archive = (self.directory / 'ctx.pyz').read_bytes()
+        previous_launcher = (self.directory / 'ctx.exe').read_bytes()
         self.make_archive('0.6.1')
         driver = self.root / 'lock-and-install.ps1'
         driver.write_text('''$ErrorActionPreference = 'Stop'
@@ -131,6 +133,9 @@ try {
                                 env=self._environment(), capture_output=True, timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.launcher('--version'), 'ContextHub 0.6.0')
+        self.assertEqual((self.directory / 'ctx.pyz').read_bytes(), previous_archive)
+        self.assertEqual((self.directory / 'ctx.exe').read_bytes(), previous_launcher)
+        self.assertEqual(list(self.directory.glob('.ctx-install-*')), [])
 
     def test_user_path_is_incremental_idempotent_and_current_shell_is_updated(self):
         driver = self.root / 'path-install.ps1'
@@ -148,8 +153,13 @@ try {
   if ($LASTEXITCODE -ne 0 -or $version -ne 'ContextHub 0.6.0') { throw 'ctx launcher was not found in current shell PATH' }
 } finally { [Environment]::SetEnvironmentVariable('Path', $before, 'User') }
 ''', encoding='ascii')
-        result = subprocess.run([POWERSHELL, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(driver)],
-                                env=self._environment(), capture_output=True, timeout=90)
+        # Interpreter matrix runs can overlap on a developer's machine. The
+        # registry PATH is shared even when installation directories differ.
+        from contexthub import safe_fs
+        with (Path(tempfile.gettempdir()) / 'contexthub-test-user-path.lock').open('a+b') as handle:
+            safe_fs.lock(handle.fileno(), blocking=True)
+            result = subprocess.run([POWERSHELL, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(driver)],
+                                    env=self._environment(), capture_output=True, timeout=90)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode('utf-8', errors='replace'))
 
     def _environment(self):

@@ -67,6 +67,7 @@ if os.name == 'nt':
     _READ = 0x80000000
     _WRITE = 0x40000000
     _ATTRIBUTES = 0x80
+    _DELETE = 0x10000
     _SHARE_READ = 1
     _SHARE_WRITE = 2
     _OPEN_EXISTING = 3
@@ -88,6 +89,13 @@ if os.name == 'nt':
         _fields_ = [('internal', ctypes.c_size_t), ('internal_high', ctypes.c_size_t),
                     ('offset', _DWORD), ('offset_high', _DWORD), ('event', _HANDLE)]
 
+    class _RenameInfo(ctypes.Structure):
+        _fields_ = [('replace', _DWORD), ('root', _HANDLE),
+                    ('length', _DWORD), ('name', wintypes.WCHAR * 1)]
+
+    class _IOStatus(ctypes.Structure):
+        _fields_ = [('status', ctypes.c_void_p), ('information', ctypes.c_size_t)]
+
     def _api(name, result, *arguments):
         function = getattr(_kernel, name)
         function.restype = result
@@ -101,10 +109,18 @@ if os.name == 'nt':
     _create_directory = _api('CreateDirectoryW', wintypes.BOOL, wintypes.LPCWSTR, wintypes.LPVOID)
     _remove_directory = _api('RemoveDirectoryW', wintypes.BOOL, wintypes.LPCWSTR)
     _delete_file = _api('DeleteFileW', wintypes.BOOL, wintypes.LPCWSTR)
-    _move_file = _api('MoveFileExW', wintypes.BOOL, wintypes.LPCWSTR, wintypes.LPCWSTR, _DWORD)
     _lock_file = _api('LockFileEx', wintypes.BOOL, _HANDLE, _DWORD, _DWORD, _DWORD,
                       _DWORD, ctypes.POINTER(_Overlapped))
     _drive_type = _api('GetDriveTypeW', wintypes.UINT, wintypes.LPCWSTR)
+
+    _ntdll = ctypes.WinDLL('ntdll', use_last_error=True)
+    _rename_file = _ntdll.NtSetInformationFile
+    _rename_file.restype = wintypes.LONG
+    _rename_file.argtypes = [_HANDLE, ctypes.POINTER(_IOStatus), wintypes.LPVOID,
+                            _DWORD, ctypes.c_int]
+    _dos_error = _ntdll.RtlNtStatusToDosError
+    _dos_error.restype = _DWORD
+    _dos_error.argtypes = [wintypes.LONG]
 
     def _error(path=None):
         number = ctypes.get_last_error()
@@ -275,19 +291,38 @@ if os.name == 'nt':
                 raise
             if not stat.S_ISREG(information.st_mode) or information.st_nlink != 1:
                 raise UnsafePathError('原子替换只允许独立常规文件')
-        # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH. No cross-volume
-        # fallback: source and target always share this anchored directory.
-        if not _move_file(source_path, target_path, 0x1 | 0x8):
-            raise _error(target_path)
+        # A full-path MoveFileEx/Win32 rename reopens the parent for writing,
+        # conflicting with our directory guards. Native FileRenameInformation
+        # with a simple name and NULL RootDirectory renames in the source's
+        # existing directory without reopening it. Keep every ancestor guarded.
+        # https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+        handle, _ = _open_handle(source_path, _DELETE, _SHARE_READ | _SHARE_WRITE,
+                                 _OPEN_EXISTING)
+        try:
+            encoded = _name(target).encode('utf-16-le')
+            buffer = ctypes.create_string_buffer(ctypes.sizeof(_RenameInfo) + len(encoded))
+            information = _RenameInfo.from_buffer(buffer)
+            information.replace = 1
+            information.root = None
+            information.length = len(encoded)
+            ctypes.memmove(ctypes.addressof(buffer) + _RenameInfo.name.offset, encoded, len(encoded))
+            status = _IOStatus()
+            result = _rename_file(handle, ctypes.byref(status), buffer, len(buffer), 10)
+            if result < 0:
+                ctypes.set_last_error(_dos_error(result))
+                raise _error(target_path)
+        finally:
+            _close_handle(handle)
 
     def sync_dir(parent):
         # Windows has no supported directory fsync equivalent. All payloads
-        # are FlushFileBuffers'd via os.fsync; replace uses WRITE_THROUGH.
+        # are FlushFileBuffers'd via os.fsync before an atomic rename.
         pass
 
-    def lock(descriptor):
+    def lock(descriptor, *, blocking=False):
         overlapped = _Overlapped()
-        if not _lock_file(msvcrt.get_osfhandle(descriptor), 0x1 | 0x2, 0, 1, 0, ctypes.byref(overlapped)):
+        flags = 0x2 | (0 if blocking else 0x1)
+        if not _lock_file(msvcrt.get_osfhandle(descriptor), flags, 0, 1, 0, ctypes.byref(overlapped)):
             number = ctypes.get_last_error()
             if number in (32, 33, 158):
                 raise BlockingIOError(11, '文件锁正在使用')
@@ -348,9 +383,9 @@ else:
     def sync_dir(parent):
         os.fsync(parent)
 
-    def lock(descriptor):
+    def lock(descriptor, *, blocking=False):
         import fcntl
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
 
     def close(descriptor):
         os.close(descriptor)

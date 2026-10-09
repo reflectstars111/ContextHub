@@ -116,7 +116,7 @@ class WindowsCredentialStorage:
                 raise ValueError('另一个 ctx 命令正在更新登录凭据，请稍后重试') from exc
             yield directory
         except OSError as exc:
-            raise ValueError('无法安全访问 Windows 登录凭据；路径不能包含链接、junction 或重解析点') from exc
+            raise ValueError(f'无法安全访问 Windows 登录凭据：{exc}；请检查文件占用与路径权限，路径不能包含链接、junction 或重解析点') from exc
         finally:
             if descriptor is not None:
                 safe_fs.close(descriptor)

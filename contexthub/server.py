@@ -69,6 +69,22 @@ class BoundedHTTPServer(ThreadingHTTPServer):
                 request.settimeout(min(self.request_timeout, 1))
                 request.sendall(b'HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\n'
                                 b'Connection: close\r\nRetry-After: 1\r\n\r\n')
+                # Closing a socket with unread request bytes resets the TCP
+                # connection on Windows, discarding the 503 for HTTP clients.
+                # Half-close the response and drain a bounded amount/time;
+                # rejected clients cannot occupy a worker or stall accept().
+                request.shutdown(socket.SHUT_WR)
+                deadline = time.monotonic() + min(self.request_timeout, 0.05)
+                remaining = 64 * 1024
+                while remaining:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        break
+                    request.settimeout(timeout)
+                    data = request.recv(min(remaining, 4096))
+                    if not data:
+                        break
+                    remaining -= len(data)
             except OSError:
                 pass
             finally:

@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import zipfile
 
-MODULES = ('__init__', '__main__', 'codex', 'ctx', 'hub_client', 'workspace',
+MODULES = ('__init__', '__main__', 'cli_runtime', 'codex', 'ctx', 'hub_client', 'workspace',
            'importers', 'package', 'platforms', 'revisions', 'safe_fs', 'windows_credentials',
            'windows_launcher')
 ENTRY_POINT = '''import sys

@@ -97,6 +97,7 @@ class CodexClient:
             self.process = subprocess.Popen(
                 self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, start_new_session=(os.name == "posix"),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
         except OSError as exc:
             raise CodexError(f"Cannot start Codex app-server: {exc}") from exc

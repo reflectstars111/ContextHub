@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 
 from . import __version__
+from .cli_runtime import configure_output
 from .package import build_package, read_package, redact_conversations
 
 
@@ -155,6 +156,7 @@ def _confirm_import(args, report):
 
 
 def main(argv=None):
+    configure_output()
     args = parser().parse_args(argv)
     try:
         if args.action in ('serve', 'connect'):

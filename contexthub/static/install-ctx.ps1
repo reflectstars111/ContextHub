@@ -237,7 +237,10 @@ try {
     for ($index = $replaced.Count - 1; $index -ge 0; $index--) {
         $item = $replaced[$index]
         try {
-            if ($item.Existed) { [IO.File]::Replace($item.Backup, $item.Target, $null) }
+            # PowerShell 5.1 marshals $null to an empty string for this .NET
+            # overload, which is an invalid backup path. Keep the failed new
+            # file inside staging while atomically restoring the old one.
+            if ($item.Existed) { [IO.File]::Replace($item.Backup, $item.Target, ($item.Backup + '.failed')) }
             else { [IO.File]::Delete($item.Target) }
         } catch { $rollbackErrors += $_.Exception.Message }
     }

@@ -188,7 +188,8 @@ class VersionStoreTests(unittest.TestCase):
         data = pack()
         sha = hashlib.sha256(data).hexdigest()
         (legacy_root / 'packages' / (sha + '.contextpack')).write_bytes(data)
-        with sqlite3.connect(legacy_root / 'hub.sqlite3') as db:
+        from contextlib import closing
+        with closing(sqlite3.connect(legacy_root / 'hub.sqlite3')) as db, db:
             db.executescript('''
                 CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL);
                 CREATE TABLE packages (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL,

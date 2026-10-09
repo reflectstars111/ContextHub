@@ -6,7 +6,7 @@
 
 ## 在终端管理对话：ctx
 
-面向 Linux / 远程服务器 / VS Code 终端，同时提供 Windows 10/11 原生预览版（无需 WSL）。网站提供[单文件与 PowerShell 安装教程](https://contexthub.reflectstars.dev/cli)，只需 Python 3.12+，无需第三方 Python 包。Windows 专用代码已在 Windows Python + Wine 验证，真实 Windows CI 尚待执行，当前保持预览标记。
+面向 Linux / 远程服务器 / VS Code 终端，同时提供 Windows 10/11 原生预览版（无需 WSL）。网站提供[单文件与 PowerShell 安装教程](https://contexthub.reflectstars.dev/cli)，只需 Python 3.12+，无需第三方 Python 包。已完成 Windows 11 本机的原生命令、DPAPI、文件锁和安装器验证，详见 [Windows 重构验证记录](docs/verification/2026-10-09-windows-cli-refactor.md)；远端 Windows CI 尚待执行，当前保持预览标记。
 
 ```bash
 ctx auth login --username alice

@@ -17,6 +17,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import __version__
+from .cli_runtime import configure_output, quote_argument
 from .hub_client import HubClient, HubClientError, normalize_hub
 from .importers import import_upload
 from .package import MAX_ARCHIVE_BYTES, MAX_CONVERSATIONS, MAX_TOTAL_BYTES, build_package, read_package
@@ -169,8 +170,7 @@ def _import_files(args):
         blob, package, report = import_upload(raw, filename=path.name, platform=args.platform, mode=args.mode)
         if report['requires_confirmation'] and not args.confirm_import:
             warning = '; '.join(report['warnings'])[:2000]
-            import shlex
-            preview = f'ctx inspect {shlex.quote(str(path))} --platform {args.platform} --mode {args.mode}'
+            preview = f'ctx inspect {quote_argument(path)} --platform {args.platform} --mode {args.mode}'
             raise ValueError(f'{path.name} 需要确认：{warning}\n请先使用 {preview} 检查，接受提示后添加 --confirm-import')
         single_blob = blob
         reports.append({'file': str(path), 'import_report': report})
@@ -408,11 +408,7 @@ def _display(args, value):
 
 
 def main(argv=None):
-    if sys.platform == 'win32':
-        # Keep JSON and Chinese output readable when redirected in Windows.
-        for stream in (sys.stdout, sys.stderr):
-            if hasattr(stream, 'reconfigure'):
-                stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+    configure_output()
     argv = list(sys.argv[1:] if argv is None else argv)
     # A truly global output switch is convenient for shell aliases and scripts.
     as_json = '--json' in argv

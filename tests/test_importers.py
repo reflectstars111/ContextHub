@@ -20,6 +20,12 @@ def zipped(entries):
         warnings.simplefilter('ignore', UserWarning)
         with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as archive:
             for name, value in entries:
+                if isinstance(name, str):
+                    # ZipInfo normally rewrites backslashes on Windows. Write
+                    # the intended raw name so unsafe-archive tests are portable.
+                    info = zipfile.ZipInfo(name)
+                    info.filename = info.orig_filename = name
+                    name = info
                 archive.writestr(name, value)
     return out.getvalue()
 

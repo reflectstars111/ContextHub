@@ -1,6 +1,6 @@
 # ctx：ContextHub 的终端工具
 
-适用 **Linux / 远程服务器 / VS Code 终端**，0.6.0 新增 **Windows 10/11 原生预览版**，需要 Python 3.12+，无需 WSL。管理对话不需要模型服务或第三方 Python 库；本地 Codex 桥接另需安装 Codex CLI。Windows 内核路径、DPAPI 和锁已在 Windows Python + Wine 执行验证，原生 Windows CI 尚待运行，因此保留预览标记。
+适用 **Linux / 远程服务器 / VS Code 终端**，0.6.0 新增 **Windows 10/11 原生预览版**，需要 Python 3.12+，无需 WSL。管理对话不需要模型服务或第三方 Python 库；本地 Codex 桥接另需安装 Codex CLI。Windows 11 本机已验证全部 `ctx` 命令、内核路径、DPAPI、锁与安装器，详见[重构验证记录](verification/2026-10-09-windows-cli-refactor.md)。远端 Windows CI 尚待运行，因此保留预览标记。
 
 ## 安装
 
@@ -31,6 +31,17 @@ py -3 .\ctx.pyz auth login --username alice
 此方式后续用 `py -3 C:\完整路径\ctx.pyz` 替换下文的 `ctx`。路径有空格时加引号。安装器还支持离线安装 `-ArchivePath .\ctx.pyz -Sha256 校验值`；自部署可使用 `-HubUrl https://自己的Hub`，运行时的站点选择仍使用 `--hub` 或 `CONTEXTHUB_HUB`。
 
 Windows 本地工作区和凭据目录仅支持普通本地磁盘路径；拒绝网络共享、网络映射盘、junction、符号链接和其他重解析点。不要将工作区放在依赖这些特性的同步目录中。此版本适配客户端，Hub 服务器的生产部署继续使用 Linux。
+
+从源码在 Windows 验证或使用全部命令：
+
+```powershell
+python -m unittest discover -v
+python -m contexthub.ctx --help
+python -m contexthub.distribution --output .\ctx.pyz
+python .\ctx.pyz --version
+```
+
+`python -m contexthub.ctx`、`ctx.pyz` 和原生 `ctx.exe` 共用命令实现；输出及重定向采用 UTF-8。PowerShell 5.1 读取保存的输出时使用 `Get-Content -Encoding UTF8`。Windows 的本地 Hub 也支持存储预算与进程间锁，生产部署建议仍按 Linux 指南执行。
 
 ### Linux
 
@@ -176,7 +187,7 @@ Windows 会识别 PATH 中的 `codex.exe` 及常见 npm 安装目录中的原生
 
 先 `ctx auth logout`，再删除 `%LOCALAPPDATA%\ContextHub\bin` 并从用户 PATH 移除该项。不要将工作区放在安装目录内；卸载不会主动删除其他位置的对话库。若需要清除本机登录配置，再单独删除 `credentials.dpapi`。
 
-仓库提供 `.github/workflows/cli-cross-platform.yml`，在 Ubuntu/Windows × Python 3.12/3.13 验证 CLI、锁、DPAPI、junction、中文路径及 PowerShell 安装器。当前工作区未连接 GitHub 远端，因此不能声称 CI 已执行。Wine 不提供的链接创建能力会明确标为跳过，真实 Windows 不跳过对应的 junction 检查。
+仓库提供 `.github/workflows/cli-cross-platform.yml`，在 Ubuntu/Windows × Python 3.12/3.13/3.14 运行全量回归，包含真实 Windows EXE 命令、锁、DPAPI、junction、中文路径及 PowerShell 安装器。本次执行的是本机验证，尚未取得远端 CI 结果。Wine 不提供的链接创建能力会明确标为跳过，真实 Windows 不跳过对应的 junction 检查。
 
 ## 脚本使用与限制
 

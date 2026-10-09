@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python: ['3.12', '3.13']
+        python: ['3.12', '3.13', '3.14']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
@@ -28,14 +28,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Check Git for temporary Hub integration tests
         run: git --version
-      - name: Test CLI, workspace, transfers, packages and distribution
-        run: >-
-          python -m unittest -v
-          tests.test_ctx tests.test_workspace tests.test_hub_client
-          tests.test_package tests.test_revisions tests.test_codex
-          tests.test_distribution tests.test_installer_core tests.test_safe_fs
-      - name: Test native Windows locks, credentials and offline installation
-        run: python -m unittest discover -v -s tests -p "test_windows*.py"
+      - name: Test all commands, native Windows behavior and Hub regressions
+        run: python -m unittest discover -v
       - name: Build CLI artifact
         run: python -m contexthub.distribution --output ctx.pyz
       - name: Run archive outside the checkout

@@ -13,10 +13,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 
-try:
-    import fcntl
-except ImportError:  # The optional public-deployment guard currently needs POSIX.
-    fcntl = None
+from . import safe_fs
 
 
 class StoreCapacityError(Exception):
@@ -40,10 +37,9 @@ class StorageBudget:
         self.max_storage_bytes = max_storage_bytes
         self.min_free_bytes = min_free_bytes
         self.enabled = max_storage_bytes is not None or min_free_bytes > 0
-        if self.enabled and fcntl is None:
-            raise ValueError('Storage budgets require POSIX file locks on this platform')
+        lock_key = os.path.normcase(os.path.abspath(root))
         with _locks_guard:
-            self._lock, self._local = _locks.setdefault(str(root), (threading.RLock(), threading.local()))
+            self._lock, self._local = _locks.setdefault(lock_key, (threading.RLock(), threading.local()))
 
     @contextmanager
     def hold(self):
@@ -62,13 +58,13 @@ class StorageBudget:
             # The shared per-root thread state also makes nested calls through
             # a second Store instance reentrant, without acquiring flock twice.
             with (self.root / '.storage.lock').open('a+b') as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                safe_fs.lock(handle.fileno(), blocking=True)
                 self._local.depth = 1
                 try:
                     yield
                 finally:
                     self._local.depth = 0
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    # Closing the handle releases both LockFileEx and flock.
 
     @staticmethod
     def _size(stat):

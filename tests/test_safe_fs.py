@@ -28,6 +28,30 @@ class WindowsPathValidationTests(unittest.TestCase):
 
 
 class SafeFilesystemTests(unittest.TestCase):
+    def test_replace_existing_file_preserves_anchor_and_rejects_open_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            (parent / 'target').write_bytes(b'old')
+            (parent / 'incoming').write_bytes(b'new')
+            anchor = fs.directory(parent)
+            try:
+                if os.name == 'nt':
+                    reader = fs.open_file(anchor, 'target', os.O_RDONLY)
+                    try:
+                        with self.assertRaises(OSError):
+                            fs.replace(anchor, 'incoming', 'target')
+                        self.assertEqual((parent / 'target').read_bytes(), b'old')
+                        self.assertEqual((parent / 'incoming').read_bytes(), b'new')
+                    finally:
+                        fs.close(reader)
+                fs.replace(anchor, 'incoming', 'target')
+                self.assertEqual((parent / 'target').read_bytes(), b'new')
+                self.assertFalse((parent / 'incoming').exists())
+                fs.replace(anchor, 'target', '中文 & !.json')
+                self.assertEqual((parent / '中文 & !.json').read_bytes(), b'new')
+            finally:
+                fs.close(anchor)
+
     def test_nested_creation_and_atomic_replace_in_unicode_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / '对话目录 with spaces' / 'private state'

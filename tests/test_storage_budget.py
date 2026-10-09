@@ -1,6 +1,7 @@
 import errno
 import hashlib
 import multiprocessing
+import os
 import tempfile
 import threading
 import unittest
@@ -40,6 +41,14 @@ class StorageBudgetTests(unittest.TestCase):
     def refuse_sql(self):
         self.store.budget.max_storage_bytes = self.store.budget.usage_bytes() + 128 * 1024
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows case-insensitive directory aliases')
+    def test_windows_case_aliases_share_reentrant_lock(self):
+        alias = Store(Path(str(self.root).swapcase()), max_storage_bytes=50 * MIB)
+        self.assertIs(self.store.budget._lock, alias.budget._lock)
+        self.assertIs(self.store.budget._local, alias.budget._local)
+        with self.store.db(), alias.db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0], 1)
+
     def proposal(self):
         contributions = Contributions(self.store)
         bob = self.store.register('bob', 'test-password-123')[0]['user']
@@ -50,13 +59,14 @@ class StorageBudgetTests(unittest.TestCase):
         proposal = contributions.create(source['id'], bob, source['version']['id'], 'Improve')
         return contributions, target, proposal
 
-    def test_default_and_unsupported_platform_preserve_unlimited_local_mode(self):
-        with patch('contexthub.storage_budget.fcntl', None):
+    def test_unlimited_mode_needs_no_lock_and_budget_uses_native_lock(self):
+        with patch('contexthub.storage_budget.safe_fs.lock', side_effect=AssertionError('unlimited mode needs no lock')):
             store = Store(self.root)
             self.assertFalse(store.budget.enabled)
             self.assertEqual(store.list_packages(), [])
-            with self.assertRaisesRegex(ValueError, 'POSIX'):
-                Store(self.root, min_free_bytes=1)
+        store = Store(self.root, min_free_bytes=1)
+        with store.budget.hold(), store.budget.hold():
+            self.assertTrue(store.budget.enabled)
 
     def test_invalid_configuration(self):
         for value in (-1, 0, True, 1.5):
@@ -187,7 +197,7 @@ class StorageBudgetTests(unittest.TestCase):
         git_files = [p for p in (self.root / 'public.git' / 'objects').rglob('*') if p.is_file()]
         self.store.delete(library['id'], self.alice['id'])
         self.assertTrue(all(path.exists() for path in blobs + git_files))
-        stored_files = sum(max(path.stat().st_size, path.stat().st_blocks * 512) for path in blobs + git_files)
+        stored_files = sum(self.store.budget._size(path.stat()) for path in blobs + git_files)
         self.assertGreaterEqual(self.store.budget.usage_bytes(), stored_files)
         self.assertEqual(self.store.list_packages(self.alice['id']), [])
 
