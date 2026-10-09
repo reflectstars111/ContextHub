@@ -1,9 +1,13 @@
 """HTTP hub and separately launched, token-protected local Codex connector."""
 
 import hmac
+import ipaddress
 import json
 import mimetypes
+import math
+import re
 import secrets
+import socket
 import threading
 import time
 from http.cookies import SimpleCookie
@@ -12,7 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .package import build_package, read_package, redact_conversations
-from .store import Store, StoreConflict
+from .store import Store, StoreConflict, StoreCapacityError
 from .revisions import build_revision, compare_packages
 from .contributions import Contributions
 from . import __version__
@@ -21,27 +25,142 @@ MAX_BODY = 101 * 1024 * 1024
 STATIC = Path(__file__).parent / 'static'
 
 
+def public_origin(value):
+    """Use one configured HTTPS origin, never a client-supplied proxy header."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value) or '\\' in value:
+        raise ValueError('公网地址必须是独立的 HTTPS 来源，例如 https://contexthub.example.com')
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError('公网地址端口无效') from exc
+    hostname = parsed.hostname or ''
+    labels = hostname.split('.')
+    if (parsed.scheme != 'https' or parsed.username is not None or parsed.password is not None
+            or parsed.path not in ('', '/') or parsed.query or parsed.fragment
+            or not hostname or len(hostname) > 253
+            or any(not re.fullmatch(r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?', label) for label in labels)
+            or port == 0 or parsed.netloc.endswith(':')):
+        raise ValueError('公网地址必须是独立的 HTTPS 来源，例如 https://contexthub.example.com')
+    authority = hostname.lower() + (f':{port}' if port not in (None, 443) else '')
+    return f'https://{authority}'
+
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """Bound accepted request workers; an idle client must eventually release one."""
+    daemon_threads = True
+
+    def __init__(self, address, handler, max_connections, request_timeout, request_deadline):
+        self._request_slots = threading.BoundedSemaphore(max_connections)
+        self.request_timeout = request_timeout
+        self.request_deadline = request_deadline
+        super().__init__(address, handler)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(self.request_timeout)
+        return request, address
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            try:
+                request.settimeout(min(self.request_timeout, 1))
+                request.sendall(b'HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\n'
+                                b'Connection: close\r\nRetry-After: 1\r\n\r\n')
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        expired = threading.Event()
+        timer = threading.Timer(self.request_deadline, self._expire_request, (request, expired))
+        timer.daemon = True
+        try:
+            timer.start()
+            self.finish_request(request, client_address)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+            pass
+        except OSError:
+            if not expired.is_set():
+                self.handle_error(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            timer.cancel()
+            if timer.ident is not None:
+                timer.join()
+            self.shutdown_request(request)
+            self._request_slots.release()
+
+    @staticmethod
+    def _expire_request(request, expired):
+        # A socket deadline interrupts reads/writes, including byte-at-a-time
+        # uploads. It cannot interrupt work already running in Python or Git.
+        expired.set()
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
 class HTTPError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, headers=None):
         self.status = status
+        self.headers = headers
         super().__init__(message)
 
 
-def create_server(data_dir, host='127.0.0.1', port=8765, mode='hub', token=None, codex_command=None):
+def create_server(data_dir, host='127.0.0.1', port=8765, mode='hub', token=None, codex_command=None,
+                  public_url=None, max_connections=16, request_timeout=30, max_body_mib=101,
+                  trust_cloudflare=False, max_storage_mib=0, min_free_mib=0, request_deadline=120):
     if mode not in ('hub', 'connector'):
         raise ValueError('invalid server mode')
     if mode == 'connector' and host not in ('127.0.0.1', 'localhost', '::1'):
         raise ValueError('本地连接器只能绑定 loopback 地址')
-    server = ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
+    origin = public_origin(public_url)
+    if origin and mode != 'hub':
+        raise ValueError('本地连接器不能配置公网地址')
+    if trust_cloudflare and (not origin or host not in ('127.0.0.1', 'localhost', '::1')):
+        raise ValueError('信任 Cloudflare 仅可用于已配置公网 HTTPS 地址且绑定 loopback 的 Hub')
+    if not isinstance(max_connections, int) or isinstance(max_connections, bool) or not 1 <= max_connections <= 128:
+        raise ValueError('最大并发连接数必须在 1–128 之间')
+    if not isinstance(request_timeout, (int, float)) or not math.isfinite(request_timeout) or request_timeout <= 0:
+        raise ValueError('连接超时必须为有限的正数')
+    if (not isinstance(request_deadline, (int, float)) or isinstance(request_deadline, bool)
+            or not math.isfinite(request_deadline) or request_deadline <= 0):
+        raise ValueError('请求连接总期限必须为有限的正数')
+    if not isinstance(max_body_mib, int) or isinstance(max_body_mib, bool) or not 1 <= max_body_mib <= 101:
+        raise ValueError('请求大小上限必须在 1–101 MiB 之间')
+    for value in (max_storage_mib, min_free_mib):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError('存储预算与磁盘保留空间必须是非负 MiB 整数')
+    server = BoundedHTTPServer((host, port), Handler, max_connections, request_timeout, request_deadline)
     server.mode = mode
-    server.store = Store(data_dir) if mode == 'hub' else None
+    server.public_origin = origin
+    server.public_host = urlsplit(origin).netloc if origin else None
+    server.trust_cloudflare = trust_cloudflare
+    server.max_body_bytes = max_body_mib * 1024 * 1024
+    server.store = Store(data_dir, max_storage_bytes=max_storage_mib * 1024 * 1024 or None,
+                         min_free_bytes=min_free_mib * 1024 * 1024) if mode == 'hub' else None
     server.contributions = Contributions(server.store) if server.store else None
     server.connector_token = token or secrets.token_urlsafe(32)
     server.codex_command = codex_command
     server.codex_lock = threading.Lock()
     server.auth_attempts = {}
     server.auth_lock = threading.Lock()
+    server.auth_pruned_at = time.monotonic()
+    server.write_attempts = {}
+    server.write_lock = threading.Lock()
+    server.write_pruned_at = time.monotonic()
     return server
 
 
@@ -61,13 +180,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
+        if self.server.public_origin:
+            self.send_header('Strict-Transport-Security', 'max-age=31536000')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != 'HEAD':
+            self.wfile.write(body)
 
     def _body(self, limit=MAX_BODY):
+        limit = min(limit, self.server.max_body_bytes)
         if self.headers.get('Transfer-Encoding'):
             raise HTTPError(400, '不支持 chunked 请求，请提供 Content-Length')
         try:
@@ -76,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
             raise HTTPError(400, '无效的 Content-Length') from exc
         if size < 0 or size > limit:
             raise HTTPError(413, '文件超过大小限制，请分批传输')
-        self.connection.settimeout(30)
+        self.connection.settimeout(self.server.request_timeout)
         data = self.rfile.read(size)
         if len(data) != size:
             raise HTTPError(400, '请求未完整上传')
@@ -92,13 +215,65 @@ class Handler(BaseHTTPRequestHandler):
         return value
 
     def _origin(self):
-        origin = self.headers.get('Origin')
-        if origin:
+        origins = self.headers.get_all('Origin', [])
+        if len(origins) > 1:
+            raise HTTPError(403, '拒绝重复的来源标头')
+        origin = origins[0] if origins else None
+        if self.server.public_origin:
+            if origin is not None and origin != self.server.public_origin:
+                raise HTTPError(403, '拒绝跨来源请求')
+        elif origin:
             parsed = urlsplit(origin)
             if parsed.scheme not in ('http', 'https') or parsed.netloc != self.headers.get('Host'):
                 raise HTTPError(403, '拒绝跨来源请求')
         if self.headers.get('Sec-Fetch-Site') == 'cross-site':
             raise HTTPError(403, '拒绝跨站请求')
+
+    def _request_headers(self):
+        # Even though the origin closes each HTTP/1.0 response, reject ambiguous
+        # framing before a proxy and the application can interpret it differently.
+        hosts = self.headers.get_all('Host', [])
+        sizes = self.headers.get_all('Content-Length', [])
+        if len(hosts) > 1 or len(sizes) > 1 or self.headers.get_all('Transfer-Encoding', []):
+            raise HTTPError(400, '拒绝重复或含糊的请求标头')
+        if sizes and not re.fullmatch(r'[0-9]+', sizes[0]):
+            raise HTTPError(400, '无效的 Content-Length')
+        if sizes and (len(sizes[0]) > 12 or int(sizes[0]) > self.server.max_body_bytes):
+            raise HTTPError(413, '文件超过大小限制，请分批传输')
+        if self.server.public_origin:
+            if len(hosts) != 1 or hosts[0].lower() != self.server.public_host:
+                raise HTTPError(421, '请求域名与配置的公网地址不符')
+            if not self.path.startswith('/') or urlsplit(self.path).netloc:
+                raise HTTPError(400, '请求地址必须使用本站路径')
+            origins = self.headers.get_all('Origin', [])
+            if len(origins) > 1 or (origins and origins[0] != self.server.public_origin):
+                raise HTTPError(403, '拒绝跨来源请求')
+        if self.server.trust_cloudflare:
+            self._client_ip()
+            schemes = self.headers.get_all('X-Forwarded-Proto', [])
+            if len(schemes) != 1 or schemes[0] not in ('http', 'https'):
+                raise HTTPError(403, '缺少可信的 Cloudflare HTTPS 标头')
+            if schemes[0] == 'http':
+                if self.command in ('GET', 'HEAD'):
+                    raise HTTPError(308, '请通过 HTTPS 访问', {'Location': self.server.public_origin + self.path})
+                raise HTTPError(426, '此服务仅支持 HTTPS，请使用配置的公网地址')
+
+    def _client_ip(self):
+        if not self.server.trust_cloudflare:
+            return self.client_address[0]
+        values = self.headers.get_all('CF-Connecting-IP', [])
+        try:
+            if (not ipaddress.ip_address(self.client_address[0]).is_loopback
+                    or len(values) != 1 or '%' in values[0]):
+                raise ValueError('untrusted proxy')
+            return str(ipaddress.ip_address(values[0]))
+        except ValueError as exc:
+            raise HTTPError(403, '缺少可信的 Cloudflare 访客地址') from exc
+
+    def _session_cookie(self, token, max_age):
+        name = '__Host-ch_session' if self.server.public_origin else 'ch_session'
+        secure = '; Secure' if self.server.public_origin else ''
+        return f'{name}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}'
 
     def _token(self):
         cookie = SimpleCookie()
@@ -106,7 +281,8 @@ class Handler(BaseHTTPRequestHandler):
             cookie.load(self.headers.get('Cookie', ''))
         except Exception:
             return ''
-        return cookie['ch_session'].value if 'ch_session' in cookie else ''
+        name = '__Host-ch_session' if self.server.public_origin else 'ch_session'
+        return cookie[name].value if name in cookie else ''
 
     def _session(self, required=False, mutate=False):
         session = self.server.store.session(self._token())
@@ -116,12 +292,37 @@ class Handler(BaseHTTPRequestHandler):
             self._origin()
             if not hmac.compare_digest(self.headers.get('X-CSRF-Token', ''), session['csrf_token'] or '') or not session['csrf_token']:
                 raise HTTPError(403, '会话校验失败，请刷新后重试')
+            if self.server.public_origin and self.server.mode == 'hub':
+                self._write_rate_limit(session['user']['id'])
         return session
+
+    def _write_rate_limit(self, user_id):
+        """Limit costly authenticated work independently of a visitor's IP."""
+        now = time.monotonic()
+        with self.server.write_lock:
+            if now - self.server.write_pruned_at >= 60 or len(self.server.write_attempts) >= 4096:
+                self.server.write_attempts = {ident: items for ident, items in self.server.write_attempts.items()
+                                              if items and now - items[-1] < 60}
+                self.server.write_pruned_at = now
+            if user_id not in self.server.write_attempts and len(self.server.write_attempts) >= 4096:
+                raise HTTPError(429, '写入请求繁忙，请稍后重试', {'Retry-After': '60'})
+            attempts = [t for t in self.server.write_attempts.get(user_id, []) if now - t < 60]
+            if len(attempts) >= 60:
+                retry = max(1, math.ceil(60 - (now - attempts[0])))
+                raise HTTPError(429, '写入操作过于频繁，请稍后重试', {'Retry-After': str(retry)})
+            attempts.append(now)
+            self.server.write_attempts[user_id] = attempts
 
     def _auth_rate_limit(self):
         now = time.monotonic()
-        address = self.client_address[0]
+        address = self._client_ip()
         with self.server.auth_lock:
+            if now - self.server.auth_pruned_at >= 60 or len(self.server.auth_attempts) >= 4096:
+                self.server.auth_attempts = {ip: items for ip, items in self.server.auth_attempts.items()
+                                             if items and now - items[-1] < 60}
+                self.server.auth_pruned_at = now
+            if address not in self.server.auth_attempts and len(self.server.auth_attempts) >= 4096:
+                raise HTTPError(429, '登录请求繁忙，请稍后重试')
             attempts = [t for t in self.server.auth_attempts.get(address, []) if now - t < 60]
             if len(attempts) >= 20:
                 raise HTTPError(429, '登录尝试过多，请稍后重试')
@@ -129,6 +330,9 @@ class Handler(BaseHTTPRequestHandler):
             self.server.auth_attempts[address] = attempts
 
     def do_GET(self):
+        self._handle('GET')
+
+    def do_HEAD(self):
         self._handle('GET')
 
     def do_POST(self):
@@ -139,10 +343,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle(self, method):
         try:
+            self._request_headers()
             path = unquote(urlsplit(self.path).path)
             query = parse_qs(urlsplit(self.path).query)
             if path == '/api/config' and method == 'GET':
-                return self._send(200, {'mode': self.server.mode, 'version': __version__, 'max_package_bytes': MAX_BODY})
+                return self._send(200, {'mode': self.server.mode, 'version': __version__, 'max_package_bytes': self.server.max_body_bytes})
             if path.startswith('/api/local/'):
                 return self._local(method, path, query)
             if path.startswith('/api/'):
@@ -153,19 +358,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._static(path)
             raise HTTPError(404, '未找到此资源')
         except HTTPError as exc:
-            self._send(exc.status, {'error': str(exc)})
+            self._send(exc.status, {'error': str(exc)}, headers=exc.headers)
         except FileNotFoundError as exc:
             self._send(404, {'error': str(exc)})
         except PermissionError as exc:
             self._send(403, {'error': str(exc)})
         except StoreConflict as exc:
             self._send(409, {'error': str(exc)})
+        except StoreCapacityError as exc:
+            self._send(507, {'error': str(exc)})
         except (ValueError, TypeError, KeyError) as exc:
             self._send(422, {'error': str(exc)[:500]})
         except (BrokenPipeError, ConnectionResetError):
             pass
         except TimeoutError:
-            self._send(504, {'error': '操作超时，请检查本地 Codex 是否可用'})
+            self._send(504, {'error': '操作超时，请稍后重试'})
         except Exception as exc:
             # Never echo upstream provider credentials or raw process output.
             self._send(500, {'error': f'操作未完成（{type(exc).__name__}），请查看终端诊断或稍后重试'})
@@ -193,11 +400,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 result, token = store.login(data.get('username'), data.get('password'))
                 status = 200
-            return self._send(status, result, headers={'Set-Cookie': f'ch_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800'})
+            return self._send(status, result, headers={'Set-Cookie': self._session_cookie(token, 604800)})
         if path == '/api/logout' and method == 'POST':
             self._session(required=True, mutate=True)
             store.logout(self._token())
-            return self._send(200, {'user': None, 'csrf_token': None}, headers={'Set-Cookie': 'ch_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'})
+            return self._send(200, {'user': None, 'csrf_token': None}, headers={'Set-Cookie': self._session_cookie('', 0)})
         if path == '/api/inspect' and method == 'POST':
             self._session(required=True, mutate=True)
             package = read_package(self._body())
@@ -214,7 +421,8 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) in (3, 4) and parts[:2] == ['api', 'packages']:
             ident = parts[2]
             mutating = method in ('POST', 'DELETE')
-            session = self._session(required=mutating, mutate=mutating)
+            downloading = method == 'GET' and len(parts) == 4 and parts[3] == 'download'
+            session = self._session(required=mutating or downloading, mutate=mutating)
             user_id = (session['user'] or {}).get('id')
             if len(parts) == 4 and parts[3] == 'download' and method == 'GET':
                 return self._send(200, store.download(ident, user_id, version_id=query.get('version', [None])[0]), 'application/zip', {'Content-Disposition': f'attachment; filename="{ident}.contextpack"'})
@@ -277,7 +485,8 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) not in (3, 4) or parts[:2] != ['api', 'contributions']:
             raise HTTPError(404, '未找到贡献请求接口')
         mutating = method == 'POST'
-        session = self._session(required=mutating, mutate=mutating)
+        downloading = method == 'GET' and len(parts) == 4 and parts[3] == 'candidate'
+        session = self._session(required=mutating or downloading, mutate=mutating)
         user = session['user']
         user_id = (user or {}).get('id')
         service = self.server.contributions

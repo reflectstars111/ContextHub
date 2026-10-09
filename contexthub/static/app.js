@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   mode: null, user: null, csrf: null, token: "", view: "library", authMode: "login",
   packages: [], sessions: [], selected: new Set(), reader: null, conversationIndex: 0,
-  inspectedFile: null, inspection: null, uploadInspectedFile: null,
+  inspectedFile: null, inspection: null, uploadInspectedFile: null, uploadLimit: null, authIntent: null,
   packageRequest: 0, sessionRequest: 0, uploadInspection: 0, readerRequest: 0,
 };
 
@@ -70,6 +70,19 @@ function formatDate(value) {
 }
 function fileInfo(file) {
   return file ? `${file.name} · ${file.size < 1024 * 1024 ? `${(file.size / 1024).toFixed(1)} KB` : `${(file.size / 1024 / 1024).toFixed(2)} MB`}` : "尚未选择文件";
+}
+function configureUploadLimit(config) {
+  const limits = [config.max_body_bytes, config.max_package_bytes].filter((value) => Number.isFinite(value) && value > 0);
+  state.uploadLimit = limits.length ? Math.min(...limits) : null;
+  document.querySelectorAll("[data-upload-limit]").forEach((element) => {
+    element.textContent = state.uploadLimit ? `当前服务单个对话包上限：${formatByteLimit(state.uploadLimit)}。` : "文件大小限制以服务端检查结果为准。";
+  });
+}
+function formatByteLimit(bytes) {
+  return `${Number((bytes / 1024 / 1024).toFixed(2))} MiB`;
+}
+function validatePackageFile(file) {
+  if (file && state.uploadLimit && file.size > state.uploadLimit) throw new Error(`文件超过当前服务的 ${formatByteLimit(state.uploadLimit)} 上限，请减少选中的对话后重新导出。`);
 }
 function safeName(title) { return String(title || "conversation").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 100); }
 function saveBlob(blob, filename) {
@@ -379,24 +392,79 @@ async function copyText(text) {
   area.remove();
   if (!copied) throw new Error("浏览器不允许复制，请使用“保存”下载内容。");
 }
-async function downloadCurrentPackage() {
-  if (!state.reader) return;
-  if (isDraft()) throw new Error("请先预览并保存新版本，再下载完整对话包。");
-  if ($( "messages").querySelector("textarea")) throw new Error("请先保存或取消正在编辑的消息，再导出。");
-  await busy($("download-package"), "正在准备…", async () => {
-    if (state.reader.kind === "local") {
-      const title = $("export-title").value.trim();
-      if (!title) { $("export-title").focus(); throw new Error("请为对话包填写标题。"); }
-      if (!(state.reader.conversations || []).some((conversation) => (conversation.messages || []).length)) throw new Error("请至少保留一条消息后再导出。");
-      const blob = await api("/api/local/export", { method: "POST", json: { conversations: state.reader.conversations, title, description: $("export-description").value.trim(), redact: $("redact-secrets").checked } }, true);
-      saveBlob(blob, `${safeName(title)}.contextpack`);
-      showStatus("对话包已生成并开始下载。自动脱敏无法覆盖所有敏感信息，请在分享前检查。");
+function packageDownloadDescriptor(reader) {
+  const version = reader.version;
+  return Object.freeze({
+    path: `/api/packages/${encodeURIComponent(reader.id)}/download${version ? `?version=${encodeURIComponent(version.id)}` : ""}`,
+    filename: `${safeName(reader.title)}${version ? `-v${version.number}` : ""}.contextpack`,
+  });
+}
+async function requestPlatformDownload(download) {
+  if (!state.user) { openAuth("download", download); return; }
+  // A session may expire or change in another tab. Check it even for the
+  // single-conversation files generated from an already rendered snapshot.
+  const session = await api("/api/session");
+  if (!session.user) {
+    updateAccount(session);
+    openAuth("download", download);
+    return;
+  }
+  try {
+    if (download.accessPath) await api(download.accessPath);
+    if (download.operation === "copy") {
+      await copyText(download.text);
+      showStatus(`已复制「${download.filename}」的内容。`);
     } else {
-      const version = state.reader.version;
-      const blob = await api(`/api/packages/${encodeURIComponent(state.reader.id)}/download${version ? `?version=${encodeURIComponent(version.id)}` : ""}`, {}, true);
-      saveBlob(blob, `${safeName(state.reader.title)}${version ? `-v${version.number}` : ""}.contextpack`);
-      showStatus("完整对话包已开始下载。");
+      const blob = download.path ? await api(download.path, {}, true) : download.blob;
+      saveBlob(blob, download.filename);
+      showStatus(`已开始下载「${download.filename}」。`);
     }
+  } catch (error) {
+    if (error.status !== 401) throw error;
+    updateAccount({ user: null, csrf_token: null });
+    openAuth("download", download);
+  }
+}
+async function copyCurrentConversation() {
+  const format = $("copy-format").value;
+  const text = conversationText();
+  if (state.mode === "connector") { await copyText(text); showStatus(`${format === "json" ? "JSON" : "Markdown"} 已复制。`); return; }
+  const reader = state.reader;
+  const version = reader.version;
+  await requestPlatformDownload(Object.freeze({ operation: "copy", text,
+    filename: `${safeName(currentConversation().title)}.${format === "json" ? "json" : "md"}`,
+    accessPath: `/api/packages/${encodeURIComponent(reader.id)}${version ? `?version=${encodeURIComponent(version.id)}` : ""}`,
+  }));
+}
+async function saveCurrentConversation() {
+  const format = $("copy-format").value;
+  const content = conversationText();
+  const conversation = currentConversation();
+  const reader = state.reader;
+  const blob = new Blob([content], { type: format === "json" ? "application/json;charset=utf-8" : "text/markdown;charset=utf-8" });
+  const filename = `${safeName(conversation.title)}.${format === "json" ? "json" : "md"}`;
+  if (state.mode === "connector") { saveBlob(blob, filename); showStatus("当前对话已开始下载。"); return; }
+  const version = reader.version;
+  await requestPlatformDownload(Object.freeze({ blob, filename,
+    accessPath: `/api/packages/${encodeURIComponent(reader.id)}${version ? `?version=${encodeURIComponent(version.id)}` : ""}`,
+  }));
+}
+async function downloadCurrentPackage() {
+  const reader = state.reader;
+  if (!reader) return;
+  if (isDraft()) throw new Error("请先预览并保存新版本，再下载完整对话包。");
+  if ($("messages").querySelector("textarea")) throw new Error("请先保存或取消正在编辑的消息，再导出。");
+  if (reader.kind !== "local") {
+    await requestPlatformDownload(packageDownloadDescriptor(reader));
+    return;
+  }
+  await busy($("download-package"), "正在准备…", async () => {
+    const title = $("export-title").value.trim();
+    if (!title) { $("export-title").focus(); throw new Error("请为对话包填写标题。"); }
+    if (!(reader.conversations || []).some((conversation) => (conversation.messages || []).length)) throw new Error("请至少保留一条消息后再导出。");
+    const blob = await api("/api/local/export", { method: "POST", json: { conversations: reader.conversations, title, description: $("export-description").value.trim(), redact: $("redact-secrets").checked } }, true);
+    saveBlob(blob, `${safeName(title)}.contextpack`);
+    showStatus("对话包已生成并开始下载。自动脱敏无法覆盖所有敏感信息，请在分享前检查。");
   });
 }
 async function deleteCurrentPackage() {
@@ -407,48 +475,87 @@ async function deleteCurrentPackage() {
   });
 }
 function setAuthMode(mode) {
+  if (state.authIntent && state.authIntent.pending) return;
   state.authMode = mode;
   const registering = mode === "register";
   $("auth-title").textContent = registering ? "创建你的工作空间" : "欢迎回来";
-  $("auth-description").textContent = registering ? "创建账户，保存和管理你的对话包。" : "登录后上传、管理你的对话包。";
+  const downloading = state.authIntent && state.authIntent.next === "download";
+  const transfer = downloading && state.authIntent.download.operation === "copy" ? "复制" : "下载";
+  $("auth-description").textContent = downloading ? `${registering ? "注册" : "登录"}后将继续${transfer}「${state.authIntent.download.filename}」。公开内容可以直接阅读，内容导出需要账户。` : state.authIntent && state.authIntent.next === "fork" ? `${registering ? "注册" : "登录"}后可从所选固定版本创建自己的 Fork。` : registering ? "创建账户，保存和管理你的对话包。" : "登录后上传、下载和管理你的对话包。";
   $("auth-submit").textContent = registering ? "创建账户" : "登录";
   $("login-tab").classList.toggle("active", !registering);
   $("register-tab").classList.toggle("active", registering);
   $("password").autocomplete = registering ? "new-password" : "current-password";
-  $("password").minLength = registering ? 8 : 1;
+  $("password").minLength = registering ? 10 : 1;
   $("auth-error").hidden = true;
+}
+function invalidateAuthIntent() { state.authIntent = null; }
+function isCurrentAuthIntent(intent) { return Boolean(intent && state.authIntent === intent && $("auth-dialog").open); }
+function openAuth(next = null, download = null, fork = null) {
+  state.authIntent = { next, download, fork, pending: false };
+  delete $("auth-dialog").dataset.next;
+  $("auth-submit").disabled = false;
+  $("login-tab").disabled = false;
+  $("register-tab").disabled = false;
+  $("password").value = "";
+  $("auth-error").textContent = "";
+  setAuthMode("login");
+  if (!$("auth-dialog").open) $("auth-dialog").showModal();
 }
 function openUpload() {
   clearStatus();
-  if (!state.user) { setAuthMode("login"); $("auth-dialog").dataset.next = "upload"; $("auth-dialog").showModal(); return; }
+  if (!state.user) { openAuth("upload"); return; }
   $("upload-error").hidden = true;
   $("upload-dialog").showModal();
 }
 function inlineError(id, error) { $(id).textContent = errorMessage(error); $(id).hidden = false; }
 async function submitAuth(event) {
   event.preventDefault();
+  const intent = state.authIntent;
+  if (!isCurrentAuthIntent(intent) || intent.pending) return;
   $("auth-error").hidden = true;
+  const mode = state.authMode;
+  let authenticated = false;
+  intent.pending = true;
+  $("auth-submit").disabled = true;
+  $("auth-submit").textContent = "请稍候…";
+  $("login-tab").disabled = true;
+  $("register-tab").disabled = true;
   try {
-    await busy($("auth-submit"), "请稍候…", async () => {
-      const session = await api(`/api/${state.authMode}`, { method: "POST", json: { username: $("username").value.trim(), password: $("password").value } });
-      updateAccount(session);
-      $("password").value = "";
-      const next = $("auth-dialog").dataset.next;
-      delete $("auth-dialog").dataset.next;
-      $("auth-dialog").close();
-      await loadPackages();
-      showStatus(state.authMode === "register" ? "账户已创建。" : "已登录。");
-      if (next === "upload") openUpload();
-      else if (!state.reader) {
-        const parameters = new URLSearchParams(window.location.search);
-        if (parameters.has("contribution")) await loadContribution(parameters.get("contribution"));
-        else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
-      }
-    });
-  } catch (error) { inlineError("auth-error", error); }
+    const session = await api(`/api/${mode}`, { method: "POST", json: { username: $("username").value.trim(), password: $("password").value } });
+    if (!isCurrentAuthIntent(intent)) return;
+    authenticated = true;
+    updateAccount(session);
+    $("password").value = "";
+    invalidateAuthIntent();
+    $("auth-dialog").close();
+    showStatus(mode === "register" ? "账户已创建。" : "已登录。");
+    // The selected download is an immutable click-time descriptor, independent
+    // of any reader/detail requests triggered by the account transition.
+    if (intent.next === "download") await perform(() => requestPlatformDownload(intent.download));
+    await loadPackages();
+    if (intent.next === "upload") openUpload();
+    else if (intent.next === "fork") openForkDialog(intent.fork);
+    else if (!intent.next && !state.reader) {
+      const parameters = new URLSearchParams(window.location.search);
+      if (parameters.has("contribution")) await loadContribution(parameters.get("contribution"));
+      else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
+    }
+  } catch (error) {
+    if (isCurrentAuthIntent(intent)) inlineError("auth-error", error);
+    else if (authenticated && state.authIntent === null) showStatus(errorMessage(error), "error");
+  } finally {
+    intent.pending = false;
+    if (isCurrentAuthIntent(intent)) {
+      $("auth-submit").disabled = false;
+      $("login-tab").disabled = false;
+      $("register-tab").disabled = false;
+      $("auth-submit").textContent = mode === "register" ? "创建账户" : "登录";
+    }
+  }
 }
 async function accountAction() {
-  if (!state.user) { delete $("auth-dialog").dataset.next; setAuthMode("login"); $("auth-dialog").showModal(); return; }
+  if (!state.user) { openAuth(); return; }
   if (!requireSavedEditor() || !leaveDraft()) return;
   await api("/api/logout", { method: "POST", json: {} });
   updateAccount({ user: null, csrf_token: null });
@@ -489,6 +596,7 @@ async function inspectUploadFile() {
   if (!file) return;
   $("upload-file-info").textContent = `${fileInfo(file)} · 正在检查内容…`;
   try {
+    validatePackageFile(file);
     const response = await api("/api/inspect", { method: "POST", headers: { "Content-Type": "application/zip" }, body: file });
     if (request !== state.uploadInspection) return;
     state.uploadInspectedFile = file;
@@ -518,7 +626,7 @@ async function submitUpload(event) {
       if (state.reader === previousReader && !isDraft()) {
         if (data.conversations) openReader({ ...data, kind: "hub" }); else await loadPackage(data.id);
       }
-      showStatus(visibility === "public" ? "已上传为公开对话包，任何访问此 Hub 的人均可阅读与下载。" : "已上传为私有对话包，仅你的账户可见。");
+      showStatus(visibility === "public" ? "已上传为公开对话包，任何人可阅读，登录后可下载。" : "已上传为私有对话包，仅你的账户可见。");
       await loadPackages();
     });
   } catch (error) { inlineError("upload-error", error); }
@@ -601,6 +709,7 @@ async function inspectImport() {
   const file = $("import-file").files[0];
   if (!file) return;
   await busy($("inspect-package"), "检查中…", async () => {
+    validatePackageFile(file);
     const data = await api("/api/local/inspect", { method: "POST", headers: { "Content-Type": "application/zip" }, body: file });
     if (file !== $("import-file").files[0]) return;
     state.inspectedFile = file; state.inspection = data;
@@ -661,18 +770,17 @@ function bindEvents() {
   $("login-tab").addEventListener("click", () => setAuthMode("login"));
   $("register-tab").addEventListener("click", () => setAuthMode("register"));
   $("auth-form").addEventListener("submit", submitAuth);
+  $("auth-dialog").addEventListener("cancel", invalidateAuthIntent);
+  $("auth-dialog").addEventListener("close", () => { if (!$("auth-dialog").open) invalidateAuthIntent(); });
+  document.querySelectorAll('[data-close="auth-dialog"]').forEach((button) => button.addEventListener("click", invalidateAuthIntent));
   $("upload-form").addEventListener("submit", submitUpload);
   $("upload-file").addEventListener("change", inspectUploadFile);
   document.querySelectorAll('input[name="visibility"]').forEach((radio) => radio.addEventListener("change", updateUploadLabel));
   $("reader-back").addEventListener("click", () => { clearStatus(); navigate(state.mode === "connector" ? "local" : "library"); });
   $("download-package").addEventListener("click", () => perform(downloadCurrentPackage));
   $("delete-package").addEventListener("click", () => perform(deleteCurrentPackage));
-  $("copy-conversation").addEventListener("click", () => perform(async () => { await copyText(conversationText()); showStatus(`${$("copy-format").value === "json" ? "JSON" : "Markdown"} 已复制。`); }));
-  $("save-conversation").addEventListener("click", () => perform(async () => {
-    const format = $("copy-format").value;
-    saveBlob(new Blob([conversationText()], { type: format === "json" ? "application/json;charset=utf-8" : "text/markdown;charset=utf-8" }), `${safeName(currentConversation().title)}.${format === "json" ? "json" : "md"}`);
-    showStatus("当前对话已开始下载。");
-  }));
+  $("copy-conversation").addEventListener("click", () => perform(copyCurrentConversation));
+  $("save-conversation").addEventListener("click", () => perform(saveCurrentConversation));
   $("refresh-local").addEventListener("click", () => perform(() => busy($("refresh-local"), "刷新中…", loadSessions)));
   ["include-archived", "include-subagents"].forEach((id) => $(id).addEventListener("change", () => perform(loadSessions)));
   $("select-all").addEventListener("change", () => { state.selected = $("select-all").checked ? new Set(state.sessions.map((session) => session.id || session.thread_id)) : new Set(); renderSessions(); });
@@ -705,6 +813,7 @@ async function initialize() {
   try {
     const config = await api("/api/config");
     state.mode = config.mode === "connector" ? "connector" : "hub";
+    configureUploadLimit(config);
     configureNavigation();
     if (state.mode === "connector") {
       navigate("local");

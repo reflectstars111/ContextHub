@@ -2,7 +2,7 @@
 
 > 一个面向 AI 对话的开源版本控制平台，让任何人的高质量 AI 对话都可以被保存、共享、复用、Fork 和持续演化。
 
-当前版本 **0.3.0**：支持 Codex 导入导出、分享、版本历史、Fork、网页编辑和差异比较，并可通过贡献请求将改进送回上游，由上游拥有者审阅后合并。
+当前版本 **0.3.1**：支持 Codex 导入导出、分享、版本历史、Fork、网页编辑和贡献审阅合并；增加公网访问保护、所有下载须登录，以及 Cloudflare Tunnel 部署配置。
 
 ## 快速启动
 
@@ -27,7 +27,7 @@ python3 -m contexthub connect --port 8766 --open
 
 1. 在自己的本地连接器中勾选 Codex 会话，预览正文、编辑或移除不想分享的消息，再下载 `.contextpack`。
 2. 在 Hub 登录，选择迁移包并查看预览，再决定“仅自己”或“公开分享”。新上传默认私有。
-3. 对方在 Hub 阅读并下载完整对话包。公开包可匿名下载；私有包仅上传者登录后可见。
+3. 对方可匿名阅读公开库，注册或登录后下载完整对话包。私有库仅所有者登录后可见，其他账号不能访问。
 4. 对方在自己的电脑上启动连接器，选择下载的包、检查内容，填写已存在的项目目录，确认导入。
 5. 按导入回执中的新会话 ID 使用 `codex resume <会话ID>`。继续对话时由对方自己的 Codex 配置和模型服务处理。
 
@@ -84,9 +84,10 @@ python3 -m contexthub import my-library.contextpack --cwd /absolute/path/to/proj
 python3 -m contexthub upload my-library.contextpack \
   --url http://127.0.0.1:8765 --username alice --visibility public
 
-# 下载公开包；私有包另加 --username alice
+# 下载公开或自己的私有包，均须登录；密码交互输入
 python3 -m contexthub download \
-  http://127.0.0.1:8765/api/packages/PACKAGE_ID/download -o downloaded.contextpack
+  http://127.0.0.1:8765/api/packages/PACKAGE_ID/download \
+  --username alice -o downloaded.contextpack
 
 # 生成两段合成对话，可用来体验上传下载
 python3 -m contexthub demo -o demo.contextpack
@@ -112,7 +113,9 @@ Hub 使用 SQLite 保存账号、索引、不可变版本、来源关系、贡�
 python3 -m contexthub serve --host 0.0.0.0 --port 8765 --data /srv/contexthub-data
 ```
 
-当前版本适合本地或受控环境试用。公网部署仍需 HTTPS 反向代理、请求与存储配额、备份及运维配置。备份时停止服务，保存整个数据目录，再以同一 `--data` 路径启动即可恢复。不要把本地连接器代理到公网。
+公开库允许匿名浏览、搜索、阅读；上传、下载（包括历史版本和合并候选）、Fork、编辑、发布、评论等操作均须注册或登录，并执行对应的所有权检查。网页 JSON/Markdown 导出与正文复制也会提示登录，复制分享链接不需要登录。公开内容已允许阅读，无法阻止访问者自行保存正文。
+
+公网部署请按 [Cloudflare Tunnel 部署指南](docs/deployment/public-cloudflare.md) 配置独立 HTTPS 子域名、可信代理、缓存绕过、资源限制及备份。模板默认只监听本机，16 MiB 请求体、4 个并发连接、5 GiB 保守存储预算及 5 GiB 磁盘保留空间；这些参数可调整。备份时停止服务，保存整个数据目录，再以同一 `--data` 路径启动即可恢复。不要把本地连接器代理到公网。
 
 ### 在 Linux 服务器常驻
 
@@ -140,7 +143,7 @@ journalctl --user -u contexthub.service -n 50 --no-pager
 
 在不带完整登录环境的自动化终端里，若出现 `Failed to connect to bus`，可为命令设置 `XDG_RUNTIME_DIR=/run/user/$(id -u)` 和 `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus`。
 
-远程 VS Code 访问仍需 SSH 端口转发：在「端口」面板转发 `8765`，使用面板给出的本地地址打开。服务器服务常驻与浏览器侧转发是两件事；重新连接 SSH 后需恢复转发。[VS Code 官方说明](https://code.visualstudio.com/docs/remote/ssh#_forwarding-a-port-creating-ssh-tunnel)
+仅本地模式下，远程 VS Code 访问仍需 SSH 端口转发：在「端口」面板转发 `8765`，使用面板给出的本地地址打开。服务器服务常驻与浏览器侧转发是两件事；重新连接 SSH 后需恢复转发。[VS Code 官方说明](https://code.visualstudio.com/docs/remote/ssh#_forwarding-a-port-creating-ssh-tunnel) 已配置公网模式的实例直接使用 HTTPS 子域名，原 localhost 地址因 Host 校验不再可用。
 
 已实现：账号、公开/私有库、正文搜索、批量 Codex 迁移、上传预览、阅读、JSON/Markdown 导出、完整包下载、校验、去重、不可变版本历史、固定版本链接、Fork、网页编辑、整包更新、消息差异比较，以及公开贡献请求、双方评论、三方检查与候选审阅合并。
 
@@ -163,9 +166,10 @@ python3 -m playwright install chromium
 python3 scripts/verify_web.py
 python3 scripts/verify_versions_web.py
 python3 scripts/verify_contributions_web.py
+python3 scripts/verify_public_access_web.py
 ```
 
-更多细节：[开发贡献指南](CONTRIBUTING.md)、[贡献回流实现计划](docs/superpowers/plans/2026-10-09-contributions.md)、[贡献回流验证记录](docs/verification/2026-10-09-contributions.md)、[版本管理验证记录](docs/verification/2026-10-09-versions.md)、[Codex 迁移证据](docs/verification/2026-10-09-transfer.md)。平台源码采用 [MIT](LICENSE)；该许可不自动适用于用户上传的对话内容。
+更多细节：[开发贡献指南](CONTRIBUTING.md)、[公网部署验证记录](docs/verification/2026-10-09-public-deployment.md)、[贡献回流实现计划](docs/superpowers/plans/2026-10-09-contributions.md)、[贡献回流验证记录](docs/verification/2026-10-09-contributions.md)、[版本管理验证记录](docs/verification/2026-10-09-versions.md)、[Codex 迁移证据](docs/verification/2026-10-09-transfer.md)。平台源码采用 [MIT](LICENSE)；该许可不自动适用于用户上传的对话内容。
 
 ## 产品文档
 

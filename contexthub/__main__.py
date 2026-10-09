@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import __version__
 from .package import build_package, read_package, redact_conversations
 
 
@@ -37,9 +38,15 @@ def http_url(value):
     return value
 
 
+def transfer_opener(*handlers):
+    opener = urllib.request.build_opener(*handlers)
+    opener.addheaders = [('User-Agent', f'ContextHub/{__version__}')]
+    return opener
+
+
 def login_opener(url, username, password_stdin=False):
     jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    opener = transfer_opener(urllib.request.HTTPCookieProcessor(jar))
     password = sys.stdin.readline().rstrip('\n') if password_stdin else getpass.getpass('ContextHub 密码: ')
     request = urllib.request.Request(url.rstrip('/') + '/api/login', json.dumps({'username': username, 'password': password}).encode(), {'Content-Type': 'application/json'})
     with opener.open(request, timeout=30) as response:
@@ -69,6 +76,14 @@ def parser():
         p.add_argument('--port', type=int, default=8765 if name == 'serve' else 8766)
         p.add_argument('--data', default='.context-data')
         p.add_argument('--open', action='store_true', help='在浏览器中打开')
+        p.add_argument('--max-connections', type=int, default=16, help='最大并发连接数（1–128，默认 16）')
+        p.add_argument('--request-deadline', type=float, default=120, help='请求连接总期限秒数（默认 120，限制网络传输，不中断计算）')
+        p.add_argument('--max-body-mib', type=int, default=101, help='单次请求大小上限（1–101 MiB，默认 101）')
+        if name == 'serve':
+            p.add_argument('--public-url', help='反向代理后的唯一 HTTPS 来源，例如 https://contexthub.example.com')
+            p.add_argument('--trust-cloudflare', action='store_true', help='仅在 loopback Cloudflare 隧道后信任 CF-Connecting-IP 限流')
+            p.add_argument('--max-storage-mib', type=int, default=0, help='数据目录写入预算（MiB，0 不启用预算）')
+            p.add_argument('--min-free-mib', type=int, default=0, help='磁盘剩余空间保留量（MiB，0 不启用保留）')
     p = sub.add_parser('list', help='列出本机 Codex 对话（只读）')
     p.add_argument('--archived', action='store_true')
     p.add_argument('--subagents', action='store_true')
@@ -109,8 +124,12 @@ def main(argv=None):
     try:
         if args.action in ('serve', 'connect'):
             from .server import create_server
-            server = create_server(args.data, args.host, args.port, mode='hub' if args.action == 'serve' else 'connector')
-            url = f'http://{args.host}:{server.server_port}/'
+            server = create_server(args.data, args.host, args.port, mode='hub' if args.action == 'serve' else 'connector',
+                                   public_url=getattr(args, 'public_url', None), max_connections=args.max_connections,
+                                   max_body_mib=args.max_body_mib, trust_cloudflare=getattr(args, 'trust_cloudflare', False),
+                                   max_storage_mib=getattr(args, 'max_storage_mib', 0), min_free_mib=getattr(args, 'min_free_mib', 0),
+                                   request_deadline=args.request_deadline)
+            url = server.public_origin + '/' if server.public_origin else f'http://{args.host}:{server.server_port}/'
             if args.action == 'connect':
                 url += '#token=' + server.connector_token
             print(f'ContextHub {args.action}: {url}', flush=True)
@@ -138,7 +157,7 @@ def main(argv=None):
             emit({k: item[k] for k in ('id', 'title', 'visibility', 'conversation_count', 'sha256')})
         elif args.action == 'download':
             url = http_url(args.url)
-            opener = urllib.request.build_opener()
+            opener = transfer_opener()
             if args.username:
                 parts = urllib.parse.urlsplit(url)
                 opener, _ = login_opener(f'{parts.scheme}://{parts.netloc}', args.username, args.password_stdin)

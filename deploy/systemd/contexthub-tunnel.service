@@ -1,0 +1,23 @@
+[Unit]
+Description=ContextHub Cloudflare Tunnel
+After=contexthub.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/cloudflared --no-autoupdate --config %h/.config/contexthub/cloudflared.yml tunnel run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+Nice=10
+UMask=0077
+NoNewPrivileges=yes
+CPUAccounting=yes
+MemoryAccounting=yes
+MemoryMax=256M
+CPUQuota=50%
+TasksMax=64
+
+[Install]
+WantedBy=default.target

@@ -56,7 +56,8 @@ class ContributionAPITests(unittest.TestCase):
         self.assertEqual(public['comparison']['summary']['messages_modified'], 1)
         checked = self.checked(path)
         check = checked['check']
-        status, candidate = self.request('GET', path + '/candidate?check_id=' + check['id'], auth=False)
+        self.assertEqual(self.request('GET', path + '/candidate?check_id=' + check['id'], auth=False)[0], 401)
+        status, candidate = self.request('GET', path + '/candidate?check_id=' + check['id'])
         self.assertEqual(status, 200)
         self.assertEqual(read_package(candidate)['conversations'][0]['messages'][1]['content'], 'Bob 提供的改进回答。')
         self.assertEqual(self.request('GET', f"/api/packages/{self.target['id']}")[1]['head_version_id'], self.target['version']['id'])

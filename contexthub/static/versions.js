@@ -1,7 +1,7 @@
 "use strict";
 
 // Immutable versions live on the server. A working copy exists only in this tab.
-const versionState = { original: null, versions: [], request: 0, preview: null, candidate: null, candidateRequest: 0, saving: false };
+const versionState = { original: null, versions: [], request: 0, preview: null, candidate: null, candidateRequest: 0, saving: false, forkTarget: null };
 function isDraft() { return Boolean(state.reader && state.reader.kind === "draft"); }
 function versionOwner(data = state.reader) {
   return Boolean(data && state.user && (data.owner_id === state.user.id || (typeof data.author === "object" ? data.author.username : data.author) === state.user.username));
@@ -56,7 +56,7 @@ function renderVersionWorkspace(data) {
   $("version-select").disabled = draft;
   $("copy-version-link").disabled = draft;
   $("compare-versions").disabled = draft;
-  $("fork-package").hidden = !state.user || draft;
+  $("fork-package").hidden = draft;
   $("edit-package").hidden = draft || !versionOwner(data) || version.id !== data.head_version_id;
   $("draft-panel").hidden = !draft;
   $("download-package").disabled = draft;
@@ -110,7 +110,7 @@ function startDraft() {
   $("draft-status").textContent = "尚未预览";
   $("save-version").disabled = true;
   $("save-version").textContent = state.reader.visibility === "public" ? "发布新版本" : "保存新版本";
-  $("draft-boundary").textContent = state.reader.visibility === "public" ? "草稿只保存在当前页面。发布后，任何人都能阅读和下载新版本。历史版本保持不变。" : "草稿只保存在当前页面。保存后仅你可见，历史版本保持不变。";
+  $("draft-boundary").textContent = state.reader.visibility === "public" ? "草稿只保存在当前页面。发布后，任何人都能阅读新版本，登录后可下载。历史版本保持不变。" : "草稿只保存在当前页面。保存后仅你可见，历史版本保持不变。";
   clearCandidate();
   openReader({ ...structuredClone(state.reader), kind: "draft" });
   showStatus("已创建编辑副本。可以修改正文，或导入对话包替换整份草稿。保存前请预览变化。");
@@ -230,6 +230,7 @@ async function inspectCandidate() {
   $("candidate-preview").hidden = false;
   $("candidate-preview").replaceChildren(node("p", "subtle", "正在检查对话包内容…"));
   try {
+    validatePackageFile(file);
     const response = await api("/api/inspect", { method: "POST", headers: { "Content-Type": "application/zip" }, body: file });
     if (!isDraft() || request !== versionState.candidateRequest) return;
     versionState.candidate = response;
@@ -251,11 +252,13 @@ function applyCandidate() {
   clearCandidate(); draftChanged(); renderConversationTabs(); renderConversation();
   showStatus("候选内容已替换草稿。请填写保存说明并预览变化，原有版本仍然保留。");
 }
-function openForkDialog() {
-  if (!state.user || !state.reader || isDraft()) return;
+function openForkDialog(source = state.reader) {
+  if (!source || source.kind !== "hub" || isDraft()) return;
+  if (!state.user) { openAuth("fork", null, structuredClone(source)); return; }
+  versionState.forkTarget = source;
   $("fork-form").reset();
-  $("fork-description").textContent = `从「${state.reader.title}」的 v${state.reader.version.number} 创建你的独立对话库。`;
-  const privateSource = state.reader.visibility === "private";
+  $("fork-description").textContent = `从「${source.title}」的 v${source.version.number} 创建你的独立对话库。`;
+  const privateSource = source.visibility === "private";
   const publicRadio = document.querySelector('input[name="fork-visibility"][value="public"]');
   publicRadio.disabled = privateSource;
   $("fork-public-option").hidden = privateSource;
@@ -272,10 +275,11 @@ async function submitFork(event) {
   try {
     await busy($("fork-submit"), "创建中…", async () => {
       const visibility = new FormData($("fork-form")).get("fork-visibility");
-      const original = state.reader;
+      const original = versionState.forkTarget;
+      if (!original) return;
       const data = await api(`/api/packages/${encodeURIComponent(original.id)}/fork`, { method: "POST", json: { version_id: original.version.id, visibility } });
       $("fork-dialog").close();
-      const unchanged = state.reader === original && !isDraft();
+      const unchanged = state.reader && state.reader.id === original.id && state.reader.version.id === original.version.id && !isDraft();
       if (unchanged) openReader({ ...data, kind: "hub" });
       await loadPackages();
       showStatus(`已创建${visibility === "public" ? "公开" : "私有"} Fork。${unchanged ? "可以编辑、导出并持续保存新版本。" : "可在对话库列表中找到，当前页面内容已保留。"}`);
@@ -358,7 +362,7 @@ function bindVersionEvents() {
   $("version-file").addEventListener("change", inspectCandidate);
   $("apply-candidate").addEventListener("click", applyCandidate);
   $("cancel-candidate").addEventListener("click", clearCandidate);
-  $("fork-package").addEventListener("click", openForkDialog);
+  $("fork-package").addEventListener("click", () => openForkDialog());
   $("fork-form").addEventListener("submit", submitFork);
   document.querySelectorAll('input[name="fork-visibility"]').forEach((radio) => radio.addEventListener("change", updateForkLabel));
   $("compare-versions").addEventListener("click", () => { $("compare-panel").hidden = false; perform(compareVersions); });

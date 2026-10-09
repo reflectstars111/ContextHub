@@ -320,10 +320,10 @@ function bindContributionEvents() {
   $("contribution-download-candidate").addEventListener("click", () => perform(async () => {
     const data = contributionState.current; const check = data && data.check;
     if (!check || !check.candidate_oid) return;
-    await busy($("contribution-download-candidate"), "准备下载…", async () => {
-      const blob = await api(`/api/contributions/${encodeURIComponent(data.id)}/candidate?check_id=${encodeURIComponent(check.id)}`, {}, true);
-      saveBlob(blob, `${safeName(data.title)}-merge-candidate.contextpack`);
-    });
+    await requestPlatformDownload(Object.freeze({
+      path: `/api/contributions/${encodeURIComponent(data.id)}/candidate?check_id=${encodeURIComponent(check.id)}`,
+      filename: `${safeName(data.title)}-merge-candidate.contextpack`,
+    }));
   }));
   $("contribution-source-version").addEventListener("change", updateContributionButtons);
   $("contribution-update-source").addEventListener("click", () => perform(() => mutateContribution("source", { source_version_id: $("contribution-source-version").value }, "提案版本已更新。上游需要重新检查合并候选。")));

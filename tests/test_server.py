@@ -64,7 +64,7 @@ class ServerTests(unittest.TestCase):
         ident = item['id']
         self.assertEqual(self.request('GET', '/api/packages', auth=False)[1]['packages'], [])
         for suffix in ['', '/download']:
-            self.assertEqual(self.request('GET', f'/api/packages/{ident}{suffix}', auth=False)[0], 404)
+            self.assertEqual(self.request('GET', f'/api/packages/{ident}{suffix}', auth=False)[0], 401 if suffix else 404)
         self.assertEqual(self.request('GET', f'/api/packages/{ident}/download')[1], sample_pack())
         self.register('bob')
         self.assertEqual(self.request('GET', '/api/packages')[1]['packages'], [])
@@ -78,9 +78,12 @@ class ServerTests(unittest.TestCase):
         status, item = self.request('POST', '/api/packages?visibility=public', pack)
         self.assertEqual(status, 201, item)
         self.assertTrue(item['git_commit'])
-        self.assertEqual(self.request('GET', f"/api/packages/{item['id']}/download", auth=False)[1], pack)
+        self.assertEqual(self.request('GET', f"/api/packages/{item['id']}", auth=False)[0], 200)
+        self.assertEqual(self.request('GET', f"/api/packages/{item['id']}/download", auth=False)[0], 401)
+        self.assertEqual(self.request('GET', f"/api/packages/{item['id']}/download")[1], pack)
         self.assertEqual(len(self.request('GET', '/api/packages?q=中文', auth=False)[1]['packages']), 1)
         self.register('bob')
+        self.assertEqual(self.request('GET', f"/api/packages/{item['id']}/download")[1], pack)
         self.assertEqual(self.request('DELETE', f"/api/packages/{item['id']}")[0], 404)
 
     def test_preview_is_not_published_and_duplicate_upload_is_idempotent(self):

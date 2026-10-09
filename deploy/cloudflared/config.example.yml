@@ -1,0 +1,15 @@
+# Copy to ~/.config/contexthub/cloudflared.yml (chmod 600).
+# Replace the tunnel UUID, credential path and hostname for your deployment.
+tunnel: YOUR_TUNNEL_UUID
+credentials-file: /home/user/.config/contexthub/tunnel.json
+protocol: http2
+edge-ip-version: "4"
+metrics: 127.0.0.1:20242
+ingress:
+  - hostname: contexthub.example.com
+    service: http://127.0.0.1:8765
+    originRequest:
+      httpHostHeader: contexthub.example.com
+      connectTimeout: 5s
+      disableChunkedEncoding: true
+  - service: http_status:404

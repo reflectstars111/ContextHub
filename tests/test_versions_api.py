@@ -45,7 +45,8 @@ class VersionAPITests(unittest.TestCase):
         self.assertEqual(status, 201, repeated)
         self.assertEqual(repeated['version']['id'], second['version']['id'])
         old_id, new_id = first['version']['id'], second['version']['id']
-        status, old_blob = self.request('GET', f'/api/packages/{ident}/download?version={old_id}', auth=False)
+        self.assertEqual(self.request('GET', f'/api/packages/{ident}/download?version={old_id}', auth=False)[0], 401)
+        status, old_blob = self.request('GET', f'/api/packages/{ident}/download?version={old_id}')
         self.assertEqual(status, 200)
         self.assertEqual(old_blob, helpers.sample_pack())
         status, old = self.request('GET', f'/api/packages/{ident}?version={old_id}', auth=False)
@@ -109,7 +110,7 @@ class VersionAPITests(unittest.TestCase):
         paths = [f'/api/packages/{ident}/versions', f'/api/packages/{ident}?version={version}',
                  f'/api/packages/{ident}/download?version={version}', f'/api/packages/{ident}/compare?from={version}&to={version}']
         for path in paths:
-            self.assertEqual(self.request('GET', path, auth=False)[0], 404, path)
+            self.assertEqual(self.request('GET', path, auth=False)[0], 401 if '/download?' in path else 404, path)
         self.register('bob')
         for path in paths:
             self.assertEqual(self.request('GET', path)[0], 404, path)

@@ -1,5 +1,6 @@
 """Small durable hub store. Public Git snapshots contain approved package data only."""
 
+import errno
 import hashlib
 import hmac
 import json
@@ -17,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .package import read_package
+from .storage_budget import BudgetConnection, StorageBudget, StoreCapacityError
 
 
 class StoreConflict(ValueError):
@@ -24,12 +26,13 @@ class StoreConflict(ValueError):
 
 
 class Store:
-    def __init__(self, root):
+    def __init__(self, root, max_storage_bytes=None, min_free_bytes=0):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.blobs = self.root / 'packages'
         self.blobs.mkdir(exist_ok=True, mode=0o700)
         self.lock = threading.RLock()
+        self.budget = StorageBudget(self.root, max_storage_bytes, min_free_bytes)
         with self.db() as db:
             db.executescript('''
                 PRAGMA journal_mode=WAL;
@@ -79,16 +82,25 @@ class Store:
 
     @contextmanager
     def db(self):
-        conn = sqlite3.connect(self.root / 'hub.sqlite3', timeout=15)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        with self.budget.hold():
+            factory = BudgetConnection if self.budget.enabled else sqlite3.Connection
+            conn = sqlite3.connect(self.root / 'hub.sqlite3', timeout=15, factory=factory)
+            if self.budget.enabled:
+                conn.budget = self.budget
+                # Bound dirty pages not yet visible to directory accounting.
+                sqlite3.Connection.execute(conn, 'PRAGMA cache_size=-256')
+            conn.row_factory = sqlite3.Row
+            try:
+                yield conn
+                conn.commit()
+            except Exception as exc:
+                conn.rollback()
+                if ((isinstance(exc, sqlite3.Error) and getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL)
+                        or (isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT))):
+                    raise StoreCapacityError('服务器磁盘空间不足，保存失败；请联系管理员') from exc
+                raise
+            finally:
+                conn.close()
 
     @staticmethod
     def password_hash(password, salt):
@@ -104,9 +116,9 @@ class Store:
         try:
             with self.db() as db:
                 db.execute('INSERT INTO users VALUES (?,?,?,?)', (user['id'], user['username'], salt, self.password_hash(password, salt)))
+                return self._new_session(db, user)
         except sqlite3.IntegrityError as exc:
             raise ValueError('该用户名已被使用') from exc
-        return self.new_session(user)
 
     def login(self, username, password):
         if not isinstance(username, str) or not isinstance(password, str) or len(password) > 128:
@@ -120,11 +132,17 @@ class Store:
         return self.new_session({'id': row['id'], 'username': row['username']})
 
     def new_session(self, user):
+        with self.db() as db:
+            return self._new_session(db, user)
+
+    @staticmethod
+    def _new_session(db, user):
+        # Registration and its first session share one transaction so any
+        # capacity or database failure leaves the username available to retry.
         token = secrets.token_urlsafe(32)
         csrf = secrets.token_urlsafe(32)
-        with self.db() as db:
-            db.execute('DELETE FROM sessions WHERE expires < ?', (time.time(),))
-            db.execute('INSERT INTO sessions VALUES (?,?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), user['id'], csrf, time.time() + 7 * 86400))
+        db.execute('DELETE FROM sessions WHERE expires < ?', (time.time(),))
+        db.execute('INSERT INTO sessions VALUES (?,?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), user['id'], csrf, time.time() + 7 * 86400))
         return {'user': user, 'csrf_token': csrf}, token
 
     def session(self, token):
@@ -143,15 +161,27 @@ class Store:
         env = dict(os.environ)
         env.update(GIT_AUTHOR_NAME='ContextHub', GIT_AUTHOR_EMAIL='contexthub@localhost',
                    GIT_COMMITTER_NAME='ContextHub', GIT_COMMITTER_EMAIL='contexthub@localhost',
-                   GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
-        return subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '--git-dir', str(repo), *args],
-                              input=data, capture_output=True, check=True, env=env).stdout.decode().strip()
+                   GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, LC_ALL='C')
+        with self.budget.hold():
+            if args and args[0] not in ('show', 'rev-parse', 'cat-file', 'log', 'for-each-ref', 'rev-list', 'fsck'):
+                self.budget.ensure(2 * len(data or b'') + 1024 * 1024)
+            try:
+                return subprocess.run(['git', '-c', 'core.hooksPath=/dev/null',
+                                       '-c', 'gc.auto=0', '-c', 'maintenance.auto=false',
+                                       '--git-dir', str(repo), *args],
+                                      input=data, capture_output=True, check=True, env=env).stdout.decode().strip()
+            except subprocess.CalledProcessError as exc:
+                if b'No space left on device' in (exc.stderr or b'') or b'Disk quota exceeded' in (exc.stderr or b''):
+                    raise StoreCapacityError('服务器磁盘空间不足，Git 保存失败；请联系管理员') from exc
+                raise
 
     def _git_snapshot(self, ident, package, parent=None, message='初始版本', second_parent=None):
         """Write immutable objects only; refs follow committed database state."""
         repo = self.root / 'public.git'
         if not repo.exists():
-            subprocess.run(['git', 'init', '--bare', str(repo)], check=True, capture_output=True)
+            with self.budget.hold():
+                self.budget.ensure(1024 * 1024)
+                subprocess.run(['git', 'init', '--bare', '--template=', str(repo)], check=True, capture_output=True)
         files = {'library.json': package['library'], 'manifest.json': package['manifest']}
         files.update({f'conversation-{i:04}.json': c for i, c in enumerate(package['conversations'])})
         tree = []
@@ -175,7 +205,7 @@ class Store:
                 row = db.execute("SELECT git_commit FROM packages WHERE id=? AND visibility='public' AND deleted=0", (ident,)).fetchone()
                 if row and row['git_commit']:
                     self._git('update-ref', f'refs/heads/packages/{ident}', row['git_commit'])
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.CalledProcessError, StoreCapacityError):
             logging.getLogger(__name__).warning('Public Git ref refresh deferred until next startup')
 
     def _repair_refs(self):
@@ -187,16 +217,22 @@ class Store:
     def _save_blob(self, data):
         digest = hashlib.sha256(data).hexdigest()
         path = self.blobs / (digest + '.contextpack')
-        if not path.exists():
-            temp = self.blobs / (uuid.uuid4().hex + '.tmp')
-            try:
-                with temp.open('xb') as f:
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                temp.replace(path)
-            finally:
-                temp.unlink(missing_ok=True)
+        with self.budget.hold():
+            if not path.exists():
+                self.budget.ensure(len(data) + 8192)
+                temp = self.blobs / (uuid.uuid4().hex + '.tmp')
+                try:
+                    with temp.open('xb') as f:
+                        f.write(data)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    temp.replace(path)
+                except OSError as exc:
+                    if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                        raise StoreCapacityError('服务器磁盘空间不足，对话包保存失败；请联系管理员') from exc
+                    raise
+                finally:
+                    temp.unlink(missing_ok=True)
         return digest
 
     @staticmethod
