@@ -327,6 +327,7 @@ class Contributions:
                  candidate_oid, target['id'], head['id'])).rowcount
             if changed != 1:
                 raise StoreConflict('上游已有新版本，请重新检查')
+            self.store._index_platforms(db, target['id'], package)
             db.execute('''UPDATE contributions SET status='merged',merged_version_id=?,updated_at=?
                 WHERE id=?''', (version_id, now, ident))
             result = self._format(db, self._context(db, ident, actor['id']), actor['id'])

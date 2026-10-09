@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   mode: null, user: null, csrf: null, token: "", view: "library", authMode: "login",
   packages: [], sessions: [], selected: new Set(), reader: null, conversationIndex: 0,
-  inspectedFile: null, inspection: null, uploadInspectedFile: null, uploadLimit: null, authIntent: null,
+  inspectedFile: null, inspection: null, uploadInspectedFile: null, uploadSnapshot: null, uploadPending: false, uploadLimit: null, authIntent: null,
   packageRequest: 0, sessionRequest: 0, uploadInspection: 0, readerRequest: 0,
 };
 
@@ -84,6 +84,35 @@ function formatByteLimit(bytes) {
 function validatePackageFile(file) {
   if (file && state.uploadLimit && file.size > state.uploadLimit) throw new Error(`文件超过当前服务的 ${formatByteLimit(state.uploadLimit)} 上限，请减少选中的对话后重新导出。`);
 }
+const PLATFORM_LABELS = Object.freeze({ codex: "Codex", chatgpt: "ChatGPT", claude: "Claude", deepseek: "DeepSeek", other: "其他" });
+function normalizePlatform(value) {
+  const aliases = { "codex-cli": "codex", "codex cli": "codex", "openai codex": "codex", "openai-codex": "codex", "chat-gpt": "chatgpt", "chat gpt": "chatgpt", "openai chatgpt": "chatgpt", "claude-code": "claude", "claude code": "claude", "anthropic claude": "claude", "deep-seek": "deepseek", "deep seek": "deepseek", "deepseek-harness": "deepseek", "deepseek harness": "deepseek", "dsh": "deepseek" };
+  const key = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return Object.hasOwn(PLATFORM_LABELS, key) ? key : Object.hasOwn(aliases, key) ? aliases[key] : "other";
+}
+function platformLabel(value) { return PLATFORM_LABELS[normalizePlatform(value)]; }
+function platformBadges(platforms) {
+  const badges = node("div", "platform-badges");
+  const values = Array.isArray(platforms) && platforms.length ? [...new Set(platforms)] : ["other"];
+  values.forEach((platform) => {
+    const badge = node("span", "platform-badge", platformLabel(platform));
+    badge.title = "声明的来源分类，不代表平台认证或支持原平台回导";
+    badges.append(badge);
+  });
+  return badges;
+}
+function conversationPlatform(conversation) {
+  const source = conversation && conversation.source || {};
+  const fields = ["platform", "adapter", "provider", "platform_claimed"];
+  const hasClaim = fields.some((field) => typeof source[field] === "string" && source[field].trim());
+  const claims = fields.map((field) => (hasClaim ? source : state.reader && state.reader.library_source || {})[field]);
+  for (const claim of claims) {
+    const platform = normalizePlatform(claim);
+    if (platform !== "other" || typeof claim === "string" && claim.trim().toLowerCase() === "other") return platform;
+  }
+  return "other";
+}
+function isSourceArchive(conversation) { return Boolean(conversation && conversation.source && conversation.source.kind === "source_archive"); }
 function safeName(title) { return String(title || "conversation").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 100); }
 function saveBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -97,10 +126,32 @@ function saveBlob(blob, filename) {
 }
 function warningText(item) {
   const translations = {
+    "Hidden conversation messages were omitted; private internal text is not imported.": "已省略隐藏消息，不导入内部私有文本。",
+    "User system-instruction messages were omitted.": "已省略用户设置的系统指令消息。",
+    "Analysis/reasoning or unsupported message channels were omitted; only visible conversation text is imported.": "已省略分析、推理或不支持的消息通道，仅导入可见对话正文。",
+    "Tool-directed messages were omitted; imported text cannot execute tools.": "已省略发给工具的消息；导入正文不会执行工具。",
     "This package contains selected conversation text and public metadata, not native session state.": "此对话包包含所选对话正文与公开元数据，不包含原生会话状态。",
     "Native UI restoration and paid-model continuation are not verified by package validation.": "对话包格式检查不验证原生界面恢复，也不验证付费模型续聊。",
     "Automatic redaction is best effort; review selected content before publishing.": "自动脱敏无法识别所有敏感信息，请在公开分享前检查所选内容。",
     "Tool messages are historical reference text; importing them must not execute tools.": "工具消息仅作为历史参考文本；导入不会执行其中的工具调用。",
+    "Reasoning/thinking content was omitted; only visible conversation text is imported.": "已略过思考过程内容，仅导入可见的对话正文。",
+    "Image/audio/video content was omitted; media bytes are not imported.": "已略过图片、音频或视频，不导入这些媒体文件。",
+    "Tool calls and tool results were omitted; imported text cannot execute tools.": "已略过工具调用和工具结果；导入的文本不会执行工具。",
+    "Attachments/files were omitted; only visible conversation text is imported.": "已略过附件和文件，仅导入可见的对话正文。",
+    "Unsupported content blocks were omitted; review the extracted text before saving.": "已略过暂不支持的内容块，请在保存前检查提取的正文。",
+    "Non-text message content was omitted.": "已略过消息中的非文本内容。",
+    "Messages with unknown roles were omitted.": "已略过无法识别角色的消息。",
+    "System instruction messages were omitted; privileged instructions are not portable.": "已略过系统指令消息；不会迁移其指令权限。",
+    "Developer instruction messages were omitted; privileged instructions are not portable.": "已略过开发者指令消息；不会迁移其指令权限。",
+    "Messages without readable text were omitted.": "已略过没有可读正文的消息。",
+    "Only the ChatGPT current_node branch is imported; other branches were omitted.": "仅导入 ChatGPT 当前选中的对话分支，其他分支已略过。",
+    "Fragment-based exports have no verified stable schema; review the extracted response text.": "此类片段格式尚无经过验证的稳定规范，请检查提取的回复正文。",
+    "Session logs are imported as historical visible text in file order, not a reconstructed active branch or resumable native session.": "会话日志按文件顺序保存为可见的历史正文；没有重建当前分支或可恢复的原生会话。",
+    "Injected runtime/plugin context was omitted; only user-authored input is imported.": "已略过运行环境或插件注入的上下文，仅导入用户撰写的输入。",
+    "System/developer instruction events were omitted.": "已略过系统或开发者指令事件。",
+    "Runtime, progress, and other non-message events were omitted.": "已略过运行状态、进度等非消息事件。",
+    "Other ZIP files, account data, attachments, and subagent logs were omitted.": "已略过 ZIP 中的其他文件、账户资料、附件及子代理日志。",
+    "Original text is preserved without automatic redaction; it may contain secrets, account data, or private paths. Review it before sharing.": "原文将保留且不会自动脱敏，可能包含密钥、账户资料或私人路径。请在分享前检查。",
   };
   if (typeof item === "string") return translations[item] || item;
   if (item && typeof item === "object") return item.message || item.warning || item.reason || JSON.stringify(item);
@@ -113,6 +164,8 @@ function warningsFrom(data) {
     else if (typeof items === "string" && items) output.push(items);
   };
   append(data && data.warnings);
+  append(data && data.import_report && data.import_report.warnings);
+  if (data && data.import_report && data.import_report.partial) output.push("部分内容未转换为对话正文，请阅读导入报告中的遗漏说明。");
   const compatibility = data && data.compatibility;
   if (Array.isArray(compatibility)) append(compatibility);
   else if (compatibility && typeof compatibility === "object") {
@@ -132,7 +185,7 @@ function renderWarnings(container, data) {
   container.replaceChildren();
   const warnings = warningsFrom(data);
   const compatibility = data && data.compatibility;
-  container.hidden = !warnings.length && !compatibility;
+  container.hidden = !warnings.length && !compatibility && !(data && data.import_report);
   if (warnings.length) {
     const box = node("div", "notice warning");
     box.append(node("h3", "", "内容与兼容性说明"));
@@ -140,6 +193,11 @@ function renderWarnings(container, data) {
     warnings.forEach((warning) => list.append(node("li", "", warning)));
     box.append(list);
     container.append(box);
+  }
+  if (data && data.import_report) {
+    const details = node("details", "provenance");
+    details.append(node("summary", "", "查看完整导入报告"), node("pre", "", JSON.stringify(data.import_report, null, 2)));
+    container.append(details);
   }
   if (compatibility) {
     const details = node("details", "provenance");
@@ -183,7 +241,7 @@ function configureNavigation() {
     nav.append(button);
   }
   $("mode-label").textContent = state.mode === "connector" ? "本地 Codex 连接器" : "ContextHub · 对话分享";
-  $("boundary-note").textContent = state.mode === "connector" ? "仅连接本机 Codex。令牌保存在此标签页，内容不会自动上传。" : "Hub 保存你主动上传的对话包，不会读取电脑上的 Codex 会话。";
+  $("boundary-note").textContent = state.mode === "connector" ? "仅连接本机 Codex。令牌保存在此标签页，内容不会自动上传。" : "Hub 保存你主动上传的对话文件。来源分类不代表平台认证，也不保证原平台回导。";
   $("account-button").hidden = state.mode === "connector";
 }
 function updateAccount(session) {
@@ -199,14 +257,18 @@ async function loadPackages() {
   const query = $("search-input").value.trim();
   $("package-grid").setAttribute("aria-busy", "true");
   try {
-    const response = await api(`/api/packages?q=${encodeURIComponent(query)}`);
+    const parameters = new URLSearchParams({ q: query });
+    const platform = $("platform-filter").value;
+    if (platform !== "all") parameters.set("platform", platform);
+    const response = await api(`/api/packages?${parameters}`);
     if (request !== state.packageRequest) return;
     state.packages = response.packages || [];
     $("package-count").textContent = `${state.packages.length} 个对话包`;
     const grid = $("package-grid");
     grid.replaceChildren();
     if (!state.packages.length) {
-      empty(grid, query ? "没有找到匹配的对话包" : "你的下一段上下文，从这里开始", query ? "试试其他关键词，或清空搜索查看全部对话包。" : "使用本地连接器导出 .contextpack，再上传到这里保存与阅读。", query ? "清空搜索" : "上传第一个对话包", query ? () => { $("search-input").value = ""; perform(loadPackages); } : openUpload);
+      const filtered = query || platform !== "all";
+      empty(grid, filtered ? "没有找到匹配的对话包" : "你的下一段上下文，从这里开始", filtered ? "试试其他来源或关键词，或清空筛选查看全部对话包。" : "上传 Codex、ChatGPT、Claude、DeepSeek 的对话文件，或按来源保存文本存档。", filtered ? "清空筛选" : "上传第一个对话包", filtered ? () => { $("search-input").value = ""; $("platform-filter").value = "all"; perform(loadPackages); } : openUpload);
       return;
     }
     for (const pack of state.packages) {
@@ -220,7 +282,7 @@ async function loadPackages() {
       const username = typeof pack.author === "object" ? pack.author.username : pack.author;
       author.append(node("span", "author-avatar", (username || "?").slice(0, 1).toUpperCase()), node("span", "", username || "未知作者"));
       footer.append(author, node("span", "", `${pack.conversation_count ?? "—"} 段对话${pack.version_count ? ` · ${pack.version_count} 个版本` : ""} · ${formatDate(pack.created_at)}`));
-      card.append(top, heading, node("p", "card-description", pack.description || "这个对话包还没有描述。"), footer);
+      card.append(top, heading, platformBadges(pack.platforms), node("p", "card-description", pack.description || "这个对话包还没有描述。"), footer);
       grid.append(card);
     }
   } finally { if (request === state.packageRequest) $("package-grid").removeAttribute("aria-busy"); }
@@ -257,6 +319,7 @@ function openReader(data) {
   $("delete-package").hidden = editable || !state.user || author !== state.user.username;
   const metadata = $("reader-metadata");
   metadata.replaceChildren(node("span", "", `${(data.conversations || []).length} 段对话`));
+  if (data.kind === "hub") metadata.append(platformBadges(data.platforms));
   if (author) metadata.append(node("span", "", `由 ${author} 上传`));
   if (data.visibility) metadata.append(node("span", "visibility-badge", data.visibility === "private" ? "仅自己" : "公开"));
   if (data.created_at) metadata.append(node("span", "", formatDate(data.created_at)));
@@ -276,7 +339,7 @@ function renderConversationTabs() {
       state.conversationIndex = index;
       renderConversationTabs(); renderConversation();
     });
-    tab.append(node("span", "", conversation.title || `对话 ${index + 1}`), node("small", "", `${(conversation.messages || []).length} 条消息`));
+    tab.append(node("span", "", conversation.title || `对话 ${index + 1}`), node("small", "", `${isSourceArchive(conversation) ? "原文存档 · " : ""}${(conversation.messages || []).length} 条消息`));
     tab.setAttribute("aria-pressed", String(index === state.conversationIndex));
     tabs.append(tab);
   });
@@ -295,9 +358,19 @@ function renderConversation() {
   $("conversation-title").textContent = conversation ? conversation.title || "未命名对话" : "没有可阅读的对话";
   $("copy-conversation").disabled = !conversation;
   $("save-conversation").disabled = !conversation;
+  const archive = isSourceArchive(conversation);
+  $("save-archive").hidden = !archive;
+  $("save-archive").disabled = !archive || (conversation.messages || []).length !== 1;
+  const editedArchive = archive && (conversation.messages || []).some((message) => (message.transformations || []).some((change) => change === "human_edited" || change && (change.kind === "human_edited" || change.type === "human_edited")));
+  $("save-archive").textContent = editedArchive ? "下载当前存档文本" : "下载存档文本";
   if (!conversation) { empty(messages, "没有对话内容", "此对话包未包含可阅读的对话。"); return; }
+  const sourceLine = node("div", "conversation-source");
+  sourceLine.append(node("span", "platform-badge", `声明来源：${platformLabel(conversationPlatform(conversation))}`));
+  if (archive) sourceLine.append(node("span", "archive-badge", "原文存档"));
+  $("conversation-provenance").append(sourceLine);
+  if (archive) $("conversation-provenance").append(node("p", "notice archive-note", "此内容按原文存档，未解析为可恢复的会话。下载存档文本保存的是当前版本正文；编辑后不再等同于原始导出。"));
   const provenance = node("details", "provenance");
-  provenance.append(node("summary", "", "来源、上下文与编辑记录"), node("pre", "", JSON.stringify(provenanceRecord(conversation), null, 2)), action("复制来源记录", "text-button", () => perform(async () => { await copyText(JSON.stringify(provenanceRecord(conversation), null, 2)); showStatus("来源记录已复制。"); })));
+  provenance.append(node("summary", "", "来源、上下文与编辑记录"), node("pre", "", JSON.stringify(provenanceRecord(conversation), null, 2)), action("复制来源记录", "text-button", () => perform(() => copyProvenance(conversation))));
   $("conversation-provenance").append(provenance);
   const editable = state.reader.kind === "local" || isDraft();
   (conversation.messages || []).forEach((message, index) => {
@@ -306,7 +379,8 @@ function renderConversation() {
     header.append(node("span", "message-avatar", message.role === "assistant" ? "AI" : message.role === "user" ? "U" : "·"), node("span", "message-label", roleLabel(message.role)));
     const transformations = message.transformations || [];
     const edited = transformations.some((item) => item === "human_edited" || item && (item.type === "human_edited" || item.kind === "human_edited"));
-    header.append(node("span", "message-provenance", edited ? "已编辑 · 保留来源" : message.provenance ? `来源：${typeof message.provenance === "string" ? message.provenance : message.provenance.platform || message.provenance.provider || "导入记录"}` : ""));
+    const declaredPlatform = message.provenance && typeof message.provenance === "object" && message.provenance.platform || conversationPlatform(conversation);
+    header.append(node("span", "message-provenance", `${edited ? "已编辑 · " : ""}声明来源：${platformLabel(declaredPlatform)}`));
     const content = node("pre", "message-content", message.content || "");
     if (editable) {
       const controls = node("div", "message-actions");
@@ -425,6 +499,16 @@ async function requestPlatformDownload(download) {
     openAuth("download", download);
   }
 }
+async function copyProvenance(conversation) {
+  const text = JSON.stringify(provenanceRecord(conversation), null, 2);
+  if (state.mode === "connector") { await copyText(text); showStatus("来源记录已复制。"); return; }
+  const reader = state.reader;
+  const version = reader.version;
+  await requestPlatformDownload(Object.freeze({ operation: "copy", text,
+    filename: `${safeName(conversation.title)}-来源记录.json`,
+    accessPath: `/api/packages/${encodeURIComponent(reader.id)}${version ? `?version=${encodeURIComponent(version.id)}` : ""}`,
+  }));
+}
 async function copyCurrentConversation() {
   const format = $("copy-format").value;
   const text = conversationText();
@@ -445,6 +529,20 @@ async function saveCurrentConversation() {
   const filename = `${safeName(conversation.title)}.${format === "json" ? "json" : "md"}`;
   if (state.mode === "connector") { saveBlob(blob, filename); showStatus("当前对话已开始下载。"); return; }
   const version = reader.version;
+  await requestPlatformDownload(Object.freeze({ blob, filename,
+    accessPath: `/api/packages/${encodeURIComponent(reader.id)}${version ? `?version=${encodeURIComponent(version.id)}` : ""}`,
+  }));
+}
+async function saveCurrentArchive() {
+  if (!requireSavedEditor()) return;
+  const conversation = currentConversation();
+  if (!isSourceArchive(conversation) || (conversation.messages || []).length !== 1) throw new Error("存档文本下载需要一条完整的存档正文，请使用 JSON 保存当前对话。");
+  const reader = state.reader;
+  const version = reader.version;
+  let filename = safeName(conversation.source.title || conversation.title || "archive");
+  if (!/\.(json|jsonl|txt|md)$/i.test(filename)) filename += ".txt";
+  const blob = new Blob([conversation.messages[0].content], { type: "text/plain;charset=utf-8" });
+  if (state.mode === "connector") { saveBlob(blob, filename); return; }
   await requestPlatformDownload(Object.freeze({ blob, filename,
     accessPath: `/api/packages/${encodeURIComponent(reader.id)}${version ? `?version=${encodeURIComponent(version.id)}` : ""}`,
   }));
@@ -560,8 +658,7 @@ async function accountAction() {
   await api("/api/logout", { method: "POST", json: {} });
   updateAccount({ user: null, csrf_token: null });
   state.reader = null;
-  state.uploadInspectedFile = null;
-  $("upload-submit").disabled = true;
+  invalidateUploadInspection();
   navigate("library"); await loadPackages(); showStatus("已退出登录。");
 }
 function renderInspection(container, data) {
@@ -572,6 +669,8 @@ function renderInspection(container, data) {
   const summary = node("div", "inspect-summary");
   summary.append(node("h3", "", library.title || data.title || "对话包内容"), node("p", "", `${conversations.length} 段对话 · ${conversations.reduce((count, conversation) => count + (conversation.messages || []).length, 0)} 条消息`));
   if (library.description || data.description) summary.append(node("p", "", library.description || data.description));
+  if (data.platforms) summary.append(platformBadges(data.platforms));
+  if (data.import_report) summary.append(node("p", "field-help", data.import_report.mode === "archive" ? "原文存档：保留 UTF-8 文本，不恢复原平台会话。" : "统一正文：仅转换支持的内容，不保证可导回原平台。"));
   container.append(summary);
   const warnings = node("div"); renderWarnings(warnings, data); container.append(warnings);
   conversations.forEach((conversation) => {
@@ -584,25 +683,43 @@ function renderInspection(container, data) {
     container.append(details);
   });
 }
-async function inspectUploadFile() {
-  const file = $("upload-file").files[0];
-  const request = ++state.uploadInspection;
+function uploadParameters(file) {
+  return new URLSearchParams({ filename: file.name, platform: $("upload-platform").value, mode: $("upload-mode").value });
+}
+function invalidateUploadInspection() {
+  state.uploadInspection++;
   state.uploadInspectedFile = null;
+  state.uploadSnapshot = null;
   $("upload-submit").disabled = true;
-  $("upload-file-info").textContent = fileInfo(file);
-  $("upload-error").hidden = true;
+  $("upload-confirm").checked = false;
+  $("upload-confirmation").hidden = true;
   $("upload-preview").hidden = true;
   $("upload-preview").replaceChildren();
+}
+function updateUploadAvailability() {
+  const snapshot = state.uploadSnapshot;
+  const current = snapshot && $("upload-file").files[0] === snapshot.file && uploadParameters(snapshot.file).toString() === snapshot.parameters;
+  $("upload-submit").disabled = state.uploadPending || !current || snapshot.requiresConfirmation && !$("upload-confirm").checked;
+}
+async function inspectUploadFile() {
+  const file = $("upload-file").files[0];
+  invalidateUploadInspection();
+  const request = state.uploadInspection;
+  $("upload-file-info").textContent = fileInfo(file);
+  $("upload-error").hidden = true;
   if (!file) return;
+  const parameters = uploadParameters(file).toString();
   $("upload-file-info").textContent = `${fileInfo(file)} · 正在检查内容…`;
   try {
     validatePackageFile(file);
-    const response = await api("/api/inspect", { method: "POST", headers: { "Content-Type": "application/zip" }, body: file });
+    const response = await api(`/api/inspect?${parameters}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
     if (request !== state.uploadInspection) return;
     state.uploadInspectedFile = file;
+    state.uploadSnapshot = Object.freeze({ file, parameters, requiresConfirmation: Boolean(response.import_report && response.import_report.requires_confirmation) });
     $("upload-file-info").textContent = `${fileInfo(file)} · 格式检查通过`;
     renderInspection($("upload-preview"), response);
-    $("upload-submit").disabled = false;
+    $("upload-confirmation").hidden = !state.uploadSnapshot.requiresConfirmation;
+    updateUploadAvailability();
   } catch (error) {
     if (request !== state.uploadInspection) return;
     $("upload-file-info").textContent = fileInfo(file);
@@ -611,18 +728,26 @@ async function inspectUploadFile() {
 }
 async function submitUpload(event) {
   event.preventDefault();
+  if (state.uploadPending) return;
   $("upload-error").hidden = true;
+  const snapshot = state.uploadSnapshot;
   const file = $("upload-file").files[0];
-  if (!file || file !== state.uploadInspectedFile) { inlineError("upload-error", new Error("请先选择文件，并等待内容检查完成。")); return; }
+  if (!snapshot || !file || file !== snapshot.file || uploadParameters(file).toString() !== snapshot.parameters) { inlineError("upload-error", new Error("请先选择文件，并等待当前来源和导入方式的内容检查完成。")); return; }
+  if (snapshot.requiresConfirmation && !$("upload-confirm").checked) { inlineError("upload-error", new Error("请先阅读导入报告并勾选确认。")); return; }
+  state.uploadPending = true;
+  const controls = [$("upload-file"), $("upload-platform"), $("upload-mode"), $("upload-confirm"), ...document.querySelectorAll('input[name="visibility"]')];
+  const visibility = new FormData($("upload-form")).get("visibility");
+  controls.forEach((control) => { control.disabled = true; });
   try {
     await busy($("upload-submit"), "上传中…", async () => {
-      const visibility = new FormData($("upload-form")).get("visibility");
+      const parameters = new URLSearchParams(snapshot.parameters);
+      parameters.set("visibility", visibility);
+      if (snapshot.requiresConfirmation) parameters.set("confirm_import", "1");
       const previousReader = state.reader;
-      const data = await api(`/api/packages?visibility=${encodeURIComponent(visibility)}`, { method: "POST", headers: { "Content-Type": "application/zip" }, body: file });
+      const data = await api(`/api/packages?${parameters}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
       $("upload-dialog").close(); $("upload-form").reset();
-      state.uploadInspectedFile = null;
+      invalidateUploadInspection();
       $("upload-file-info").textContent = "尚未选择文件";
-      $("upload-preview").replaceChildren(); $("upload-preview").hidden = true;
       if (state.reader === previousReader && !isDraft()) {
         if (data.conversations) openReader({ ...data, kind: "hub" }); else await loadPackage(data.id);
       }
@@ -630,8 +755,12 @@ async function submitUpload(event) {
       await loadPackages();
     });
   } catch (error) { inlineError("upload-error", error); }
-  $("upload-submit").disabled = !state.uploadInspectedFile;
-  updateUploadLabel();
+  finally {
+    state.uploadPending = false;
+    controls.forEach((control) => { control.disabled = false; });
+    updateUploadAvailability();
+    updateUploadLabel();
+  }
 }
 function updateUploadLabel() {
   const visibility = new FormData($("upload-form")).get("visibility");
@@ -766,6 +895,7 @@ function bindEvents() {
   document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => $(button.dataset.close).close()));
   $("account-button").addEventListener("click", () => perform(accountAction));
   $("open-upload").addEventListener("click", openUpload);
+  $("platform-filter").addEventListener("change", () => perform(loadPackages));
   $("search-form").addEventListener("submit", (event) => { event.preventDefault(); perform(loadPackages); });
   $("login-tab").addEventListener("click", () => setAuthMode("login"));
   $("register-tab").addEventListener("click", () => setAuthMode("register"));
@@ -775,12 +905,16 @@ function bindEvents() {
   document.querySelectorAll('[data-close="auth-dialog"]').forEach((button) => button.addEventListener("click", invalidateAuthIntent));
   $("upload-form").addEventListener("submit", submitUpload);
   $("upload-file").addEventListener("change", inspectUploadFile);
+  $("upload-platform").addEventListener("change", inspectUploadFile);
+  $("upload-mode").addEventListener("change", inspectUploadFile);
+  $("upload-confirm").addEventListener("change", updateUploadAvailability);
   document.querySelectorAll('input[name="visibility"]').forEach((radio) => radio.addEventListener("change", updateUploadLabel));
   $("reader-back").addEventListener("click", () => { clearStatus(); navigate(state.mode === "connector" ? "local" : "library"); });
   $("download-package").addEventListener("click", () => perform(downloadCurrentPackage));
   $("delete-package").addEventListener("click", () => perform(deleteCurrentPackage));
   $("copy-conversation").addEventListener("click", () => perform(copyCurrentConversation));
   $("save-conversation").addEventListener("click", () => perform(saveCurrentConversation));
+  $("save-archive").addEventListener("click", () => perform(saveCurrentArchive));
   $("refresh-local").addEventListener("click", () => perform(() => busy($("refresh-local"), "刷新中…", loadSessions)));
   ["include-archived", "include-subagents"].forEach((id) => $(id).addEventListener("change", () => perform(loadSessions)));
   $("select-all").addEventListener("change", () => { state.selected = $("select-all").checked ? new Set(state.sessions.map((session) => session.id || session.thread_id)) : new Set(); renderSessions(); });

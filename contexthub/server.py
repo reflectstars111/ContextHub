@@ -384,6 +384,18 @@ class Handler(BaseHTTPRequestHandler):
         file = STATIC / allowed[path]
         return self._send(200, file.read_bytes(), (mimetypes.guess_type(str(file))[0] or 'text/plain') + '; charset=utf-8')
 
+    def _import_upload(self, query):
+        from .importers import import_upload
+        options = {}
+        for key, default in (('filename', ''), ('platform', 'auto'), ('mode', 'normalize')):
+            values = query.get(key, [default])
+            if len(values) != 1:
+                raise ValueError(f'导入参数 {key} 不能重复')
+            options[key] = values[0]
+        if len(options['filename']) > 512:
+            raise ValueError('文件名过长')
+        return import_upload(self._body(), **options)
+
     def _hub(self, method, path, query):
         store = self.server.store
         if path.startswith('/api/contributions/'):
@@ -407,16 +419,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {'user': None, 'csrf_token': None}, headers={'Set-Cookie': self._session_cookie('', 0)})
         if path == '/api/inspect' and method == 'POST':
             self._session(required=True, mutate=True)
-            package = read_package(self._body())
-            return self._send(200, {k: package[k] for k in ('library', 'conversations', 'compatibility')})
+            _, package, report = self._import_upload(query)
+            return self._send(200, {**{k: package[k] for k in ('library', 'conversations', 'compatibility')},
+                                    'platforms': report['platforms'], 'import_report': report})
         if path == '/api/packages':
             if method == 'GET':
                 session = self._session()
-                return self._send(200, {'packages': store.list_packages((session['user'] or {}).get('id'), query.get('q', [''])[0])})
+                from .platforms import PLATFORMS
+                platforms = query.get('platform', [None])
+                if len(platforms) != 1 or (platforms[0] is not None and platforms[0] not in PLATFORMS):
+                    raise ValueError('请选择有效的平台分类')
+                return self._send(200, {'packages': store.list_packages((session['user'] or {}).get('id'),
+                                    query.get('q', [''])[0], platforms[0])})
             if method == 'POST':
                 session = self._session(required=True, mutate=True)
-                result = store.add_package(session['user'], self._body(), query.get('visibility', ['private'])[0])
-                return self._send(201, result)
+                blob, _, report = self._import_upload(query)
+                if report['requires_confirmation'] and query.get('confirm_import') != ['1']:
+                    raise ValueError('请先预览并确认导入提示；接受遗漏或原文存档后再上传（confirm_import=1）')
+                result = store.add_package(session['user'], blob, query.get('visibility', ['private'])[0])
+                return self._send(201, {**result, 'import_report': report})
         parts = path.strip('/').split('/')
         if len(parts) in (3, 4) and parts[:2] == ['api', 'packages']:
             ident = parts[2]
@@ -546,6 +567,8 @@ class Handler(BaseHTTPRequestHandler):
             package = read_package(self._body())
             if path.endswith('inspect'):
                 return self._send(200, {k: package[k] for k in ('library', 'conversations', 'compatibility')})
+            if any(c['source'].get('kind') == 'source_archive' for c in package['conversations']):
+                raise ValueError('原文存档尚未解析为对话，不能作为会话恢复；请先将原文件转换为角色消息')
             cwd = query.get('cwd', [''])[0]
             if not cwd or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
                 raise ValueError('请选择存在的本地项目绝对路径')

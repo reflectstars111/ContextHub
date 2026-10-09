@@ -2,7 +2,7 @@
 
 > 一个面向 AI 对话的开源版本控制平台，让任何人的高质量 AI 对话都可以被保存、共享、复用、Fork 和持续演化。
 
-当前版本 **0.3.1**：支持 Codex 导入导出、分享、版本历史、Fork、网页编辑和贡献审阅合并；增加公网访问保护、所有下载须登录，以及 Cloudflare Tunnel 部署配置。
+当前版本 **0.4.0**：增加 Claude、Claude Code、DeepSeek/dsh、ChatGPT 导出文件适配与平台分类；无法解析的文本可按原文存档。保留 Codex 迁移、版本、Fork、贡献合并与公网登录权限。
 
 ## 快速启动
 
@@ -22,6 +22,14 @@ python3 -m contexthub connect --port 8766 --open
 ```
 
 使用终端输出的完整地址打开连接器，地址中包含本次启动的令牌。Hub 和连接器是两个独立进程；连接器只监听本机，Hub 不读取服务器上的 Codex 会话。
+
+## Claude、DeepSeek/dsh 与其他平台
+
+Hub 的「上传对话包」现在也可选择导出 JSON/JSONL 或受支持的导出 ZIP，先检查内容再保存。支持 Claude 网页对话、Claude Code 文本日志、ChatGPT 当前分支、DeepSeek 通用消息/文本片段，以及 DeepSeek Harness（dsh）的受支持会话事件。平台分类为 **Codex、ChatGPT、Claude、DeepSeek、其他**；混合来源库可出现在多个分类中，版本与 Fork 保留来源记录。
+
+默认自动识别格式。通用 `messages` 结构无法确定来源时可手选平台；不能仅凭文件名判断。遇到图片、附件、工具、思考或分支等不能转换的部分，会提示遗漏并要求确认后保存。未知 UTF-8 JSON、JSONL、文本或 Markdown 可手动切换为「原文存档」，仍可分类、阅读和下载；不会把未解析原文当作已恢复的会话。
+
+新上传默认私有，所有下载和写操作仍须登录。原生转换保存受支持正文，原文存档则保留完整文本；二者均不承诺能回导原平台继续聊天。文件结构、导出入口、大小限制和命令行示例见[多平台导入指南](docs/import-formats.md)，测试与上线证据见[多平台验证记录](docs/verification/2026-10-09-multiplatform.md)。
 
 ## 把对话交给另一个人
 
@@ -147,7 +155,7 @@ journalctl --user -u contexthub.service -n 50 --no-pager
 
 已实现：账号、公开/私有库、正文搜索、批量 Codex 迁移、上传预览、阅读、JSON/Markdown 导出、完整包下载、校验、去重、不可变版本历史、固定版本链接、Fork、网页编辑、整包更新、消息差异比较，以及公开贡献请求、双方评论、三方检查与候选审阅合并。
 
-后续平台工作：服务器草稿、图形冲突解决、许可与发布管理、粘贴和其他平台导入、站内通知与发现。当前还没有原生 Git push/clone 服务。
+后续平台工作：服务器草稿、图形冲突解决、许可与发布管理、粘贴整理、更多原生适配器、站内通知与发现。当前还没有原生 Git push/clone 服务。
 
 ## 开发与验证
 
@@ -167,6 +175,7 @@ python3 scripts/verify_web.py
 python3 scripts/verify_versions_web.py
 python3 scripts/verify_contributions_web.py
 python3 scripts/verify_public_access_web.py
+python3 scripts/verify_multiplatform_web.py
 ```
 
 更多细节：[开发贡献指南](CONTRIBUTING.md)、[公网部署验证记录](docs/verification/2026-10-09-public-deployment.md)、[贡献回流实现计划](docs/superpowers/plans/2026-10-09-contributions.md)、[贡献回流验证记录](docs/verification/2026-10-09-contributions.md)、[版本管理验证记录](docs/verification/2026-10-09-versions.md)、[Codex 迁移证据](docs/verification/2026-10-09-transfer.md)。平台源码采用 [MIT](LICENSE)；该许可不自动适用于用户上传的对话内容。

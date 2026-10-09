@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .package import read_package
+from .platforms import PLATFORMS, normalize_platform, package_platforms
 from .storage_budget import BudgetConnection, StorageBudget, StoreCapacityError
 
 
@@ -51,6 +52,7 @@ class Store:
                     deleted INTEGER NOT NULL DEFAULT 0);
             ''')
         self._migrate_versions()
+        self._migrate_platforms()
         self._repair_refs()
 
     def _migrate_versions(self):
@@ -79,6 +81,41 @@ class Store:
                      row['conversation_count'], row['search_text'], '初始版本', row['owner_id'],
                      row['created_at'], row['git_commit']))
                 db.execute('UPDATE packages SET head_version_id=? WHERE id=?', (version_id, row['id']))
+
+    def _migrate_platforms(self):
+        """Backfill only missing head classifications, atomically and once."""
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('''CREATE TABLE IF NOT EXISTS package_platforms (
+                package_id TEXT NOT NULL, platform TEXT NOT NULL
+                CHECK(platform IN ('codex','chatgpt','claude','deepseek','other')),
+                PRIMARY KEY(package_id, platform))''')
+            db.execute('CREATE INDEX IF NOT EXISTS platforms_lookup ON package_platforms(platform, package_id)')
+            rows = db.execute('''SELECT p.id,p.sha256 FROM packages p WHERE p.deleted=0
+                AND NOT EXISTS (SELECT 1 FROM package_platforms c WHERE c.package_id=p.id)''').fetchall()
+            for row in rows:
+                package = read_package((self.blobs / (row['sha256'] + '.contextpack')).read_bytes())
+                self._index_platforms(db, row['id'], package)
+
+    @staticmethod
+    def _index_platforms(db, ident, package):
+        # Callers hold the same transaction that changes the library head.
+        db.execute('DELETE FROM package_platforms WHERE package_id=?', (ident,))
+        db.executemany('INSERT INTO package_platforms (package_id,platform) VALUES (?,?)',
+                       ((ident, platform) for platform in package_platforms(package)))
+
+    @staticmethod
+    def _indexed_platforms(db, identifiers):
+        if not identifiers:
+            return {}
+        placeholders = ','.join('?' for _ in identifiers)
+        rows = db.execute(f'SELECT package_id,platform FROM package_platforms WHERE package_id IN ({placeholders})',
+                          identifiers).fetchall()
+        values = {ident: set() for ident in identifiers}
+        for row in rows:
+            values[row['package_id']].add(row['platform'])
+        return {ident: [platform for platform in PLATFORMS if platform in platforms] or ['other']
+                for ident, platforms in values.items()}
 
     @contextmanager
     def db(self):
@@ -261,6 +298,7 @@ class Store:
             (id,package_id,number,parent_id,sha256,title,description,conversation_count,search_text,
              message,author_id,created_at,git_commit) VALUES (?,?,1,NULL,?,?,?,?,?,?,?,?,?)''',
             (version_id, ident, digest, title, description, count, search, message, owner['id'], now, commit))
+        self._index_platforms(db, ident, package)
         return ident, version_id
 
     def add_package(self, owner, data, visibility='private'):
@@ -317,6 +355,7 @@ class Store:
                     (version_id, digest, title, description, count, search, commit, ident, base_version)).rowcount
                 if changed != 1:
                     raise StoreConflict('对话库已有新版本，请刷新后比较并重新保存')
+                self._index_platforms(db, ident, package)
         if row['visibility'] == 'public':
             self._sync_git_ref(ident)
         return self.detail(ident, owner['id'], version_id)
@@ -382,19 +421,26 @@ class Store:
             result.update(version=self._version_metadata(version), upstream=self._upstream(db, row, user_id))
         return result
 
-    def list_packages(self, user_id=None, query=''):
+    def list_packages(self, user_id=None, query='', platform=None):
+        selected_platform = normalize_platform(platform) if platform is not None else None
         with self.db() as db:
+            db.execute('BEGIN')
             rows = db.execute("""SELECT p.*,u.username AS author,
                 (SELECT count(*) FROM package_versions v WHERE v.package_id=p.id) AS version_count
                 FROM packages p JOIN users u ON u.id=p.owner_id WHERE p.deleted=0
                 AND (p.visibility='public' OR p.owner_id=?) AND instr(lower(p.search_text),lower(?))>0
-                ORDER BY p.created_at DESC LIMIT 200""", (user_id, query[:200])).fetchall()
-            return [{**self.public_row(row), 'upstream': self._upstream(db, row, user_id)} for row in rows]
+                AND (? IS NULL OR EXISTS (SELECT 1 FROM package_platforms c WHERE c.package_id=p.id AND c.platform=?))
+                ORDER BY p.created_at DESC LIMIT 200""", (user_id, query[:200], selected_platform, selected_platform)).fetchall()
+            categories = self._indexed_platforms(db, [row['id'] for row in rows])
+            return [{**self.public_row(row), 'upstream': self._upstream(db, row, user_id),
+                     'platforms': categories[row['id']]} for row in rows]
 
     def get(self, ident, user_id=None):
         with self.db() as db:
+            db.execute('BEGIN')
             row = self._package_row(db, ident, user_id)
-            return {**self.public_row(row), 'upstream': self._upstream(db, row, user_id)}
+            return {**self.public_row(row), 'upstream': self._upstream(db, row, user_id),
+                    'platforms': self._indexed_platforms(db, [ident])[ident]}
 
     def download(self, ident, user_id=None, version_id=None):
         row = self._selected(ident, user_id, version_id)
@@ -405,7 +451,7 @@ class Store:
         package = read_package((self.blobs / (row['sha256'] + '.contextpack')).read_bytes())
         return {**row, 'title': package['library']['title'], 'description': package['library']['description'],
                 'conversations': package['conversations'], 'compatibility': package['compatibility'],
-                'library_source': package['library']['source']}
+                'library_source': package['library']['source'], 'platforms': package_platforms(package)}
 
     def versions(self, ident, user_id=None):
         with self.db() as db:

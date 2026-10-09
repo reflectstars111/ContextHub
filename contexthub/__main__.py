@@ -26,7 +26,9 @@ def save(path, data, force=False):
 
 
 def inspect_package(package):
+    from .platforms import package_platforms
     return {'title': package['library'].get('title'), 'conversation_count': len(package['conversations']),
+            'platforms': package_platforms(package),
             'conversations': [{'id': c['id'], 'title': c['title'], 'message_count': len(c['messages'])} for c in package['conversations']],
             'compatibility': package['compatibility']}
 
@@ -68,7 +70,7 @@ def demo():
 
 
 def parser():
-    root = argparse.ArgumentParser(prog='contexthub', description='Codex 对话导出、分享与导入工具')
+    root = argparse.ArgumentParser(prog='contexthub', description='多平台 AI 对话保存、分享与 Codex 迁移工具')
     sub = root.add_subparsers(dest='action', required=True)
     for name in ('serve', 'connect'):
         p = sub.add_parser(name, help='启动分享站点' if name == 'serve' else '启动本地 Codex 连接器')
@@ -95,14 +97,24 @@ def parser():
     p.add_argument('-o', '--output', required=True)
     p.add_argument('--no-redact', action='store_true', help='关闭常见敏感信息辅助脱敏；仍需自行检查')
     p.add_argument('--force', action='store_true')
-    p = sub.add_parser('inspect', help='检查迁移包摘要与兼容报告')
+    p = sub.add_parser('inspect', help='检查迁移包或平台导出文件的摘要与兼容报告')
     p.add_argument('file')
+    _import_arguments(p)
+    p = sub.add_parser('convert', help='将平台导出 JSON/JSONL 或原文存档转换为 .contextpack')
+    p.add_argument('file')
+    _import_arguments(p)
+    p.add_argument('-o', '--output')
+    p.add_argument('--dry-run', action='store_true', help='只检查转换结果，不保存文件')
+    p.add_argument('--confirm-import', action='store_true', help='已阅读检查报告，接受转换遗漏或原文存档')
+    p.add_argument('--force', action='store_true')
     p = sub.add_parser('import', help='导入迁移包为新的 Codex 上下文会话')
     p.add_argument('file')
     p.add_argument('--cwd', default=str(Path.cwd()))
     p.add_argument('--dry-run', action='store_true', help='只检查迁移包，不写入 Codex')
-    p = sub.add_parser('upload', help='上传迁移包到 ContextHub')
+    p = sub.add_parser('upload', help='上传迁移包或平台导出文件到 ContextHub')
     p.add_argument('file')
+    _import_arguments(p)
+    p.add_argument('--confirm-import', action='store_true', help='已阅读检查报告，接受转换遗漏或原文存档')
     p.add_argument('--url', required=True)
     p.add_argument('--username', required=True)
     p.add_argument('--password-stdin', action='store_true')
@@ -117,6 +129,29 @@ def parser():
     p.add_argument('-o', '--output', default='demo.contextpack')
     p.add_argument('--force', action='store_true')
     return root
+
+
+def _import_arguments(parser):
+    from .platforms import PLATFORMS
+    parser.add_argument('--platform', choices=('auto', *PLATFORMS), default='auto', help='自动识别或声明来源平台')
+    parser.add_argument('--mode', choices=('normalize', 'archive'), default='normalize',
+                        help='解析为统一对话，或显式原文存档（仅 UTF-8 文本）')
+
+
+def _read_import(args):
+    from .importers import import_upload
+    from .package import MAX_ARCHIVE_BYTES
+    path = Path(args.file)
+    with path.open('rb') as file:
+        raw = file.read(MAX_ARCHIVE_BYTES + 1)
+    blob, package, report = import_upload(raw, filename=path.name, platform=args.platform, mode=args.mode)
+    return raw, blob, package, report
+
+
+def _confirm_import(args, report):
+    if report['requires_confirmation'] and not args.confirm_import:
+        warnings = '; '.join(report['warnings'])[:2000]
+        raise ValueError(f'请先运行 inspect 检查内容；接受以下提示后添加 --confirm-import：{warnings}')
 
 
 def main(argv=None):
@@ -145,16 +180,32 @@ def main(argv=None):
             save(args.output, demo(), args.force)
             emit({'output': str(Path(args.output).resolve()), 'synthetic': True})
         elif args.action == 'inspect':
-            emit(inspect_package(read_package(Path(args.file).read_bytes())))
+            _, _, package, report = _read_import(args)
+            emit({**inspect_package(package), 'import_report': report})
+        elif args.action == 'convert':
+            _, blob, package, report = _read_import(args)
+            if args.dry_run:
+                emit({'dry_run': True, **inspect_package(package), 'import_report': report})
+            else:
+                if not args.output:
+                    raise ValueError('请用 -o 指定输出 .contextpack 文件，或添加 --dry-run 只检查')
+                _confirm_import(args, report)
+                save(args.output, blob, args.force)
+                emit({'output': str(Path(args.output).resolve()), **inspect_package(package), 'import_report': report})
         elif args.action == 'upload':
             url = http_url(args.url)
-            blob = Path(args.file).read_bytes()
-            read_package(blob)
+            raw, _, _, report = _read_import(args)
+            _confirm_import(args, report)
             opener, csrf = login_opener(url, args.username, args.password_stdin)
-            request = urllib.request.Request(url.rstrip('/') + '/api/packages?visibility=' + args.visibility, blob, {'Content-Type': 'application/zip', 'X-CSRF-Token': csrf})
+            query = urllib.parse.urlencode({'visibility': args.visibility, 'filename': Path(args.file).name,
+                                            'platform': args.platform, 'mode': args.mode,
+                                            'confirm_import': '1' if args.confirm_import else '0'})
+            request = urllib.request.Request(url.rstrip('/') + '/api/packages?' + query, raw,
+                                             {'Content-Type': 'application/octet-stream', 'X-CSRF-Token': csrf})
             with opener.open(request, timeout=90) as response:
                 item = json.load(response)
-            emit({k: item[k] for k in ('id', 'title', 'visibility', 'conversation_count', 'sha256')})
+            emit({**{k: item[k] for k in ('id', 'title', 'visibility', 'conversation_count', 'sha256')},
+                  'platforms': item.get('platforms', report['platforms'])})
         elif args.action == 'download':
             url = http_url(args.url)
             opener = transfer_opener()
@@ -171,6 +222,8 @@ def main(argv=None):
             if args.dry_run:
                 emit({'dry_run': True, **inspect_package(package)})
                 return 0
+            if any(c['source'].get('kind') == 'source_archive' for c in package['conversations']):
+                raise ValueError('原文存档尚未解析为对话，不能作为会话恢复；请先将原文件转换为角色消息')
             cwd = Path(args.cwd).resolve()
             if not cwd.is_dir():
                 raise ValueError('目标项目目录不存在')
