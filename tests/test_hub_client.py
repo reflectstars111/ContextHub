@@ -108,9 +108,10 @@ class HubClientTests(unittest.TestCase):
         self.assertEqual(result['user']['username'], 'alice')
         self.assertNotIn('csrf_token', result)
         path = self.credentials.path
-        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
-        self.assertNotIn('synthetic-password', path.read_text())
+        if os.name != 'nt':
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+        self.assertNotIn(b'synthetic-password', path.read_bytes())
         record = self.credentials.get(hub.origin)
         self.assertEqual(server.store.session(record['token'])['user']['username'], 'alice')
         resumed = self.client.HubClient(hub.origin, self.client.Credentials(path))
@@ -193,6 +194,7 @@ class HubClientTests(unittest.TestCase):
         self.assertEqual(headers['Origin'], peer.origin)
         self.assertEqual(data, b'pack')
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX permissions; native Windows path checks have separate tests')
     def test_credentials_reject_symlinks_and_world_readable_files(self):
         peer = self.peer()
         self.credentials.set(peer.origin, self.record())
@@ -212,10 +214,12 @@ class HubClientTests(unittest.TestCase):
     def test_credentials_path_environment_and_local_expiry(self):
         custom = Path(self.tmp.name) / 'custom'
         with patch.dict(os.environ, {'CONTEXTHUB_CONFIG_DIR': str(custom)}):
-            self.assertEqual(self.client.Credentials().path, custom / 'credentials.json')
-        with patch.dict(os.environ, {'XDG_CONFIG_HOME': str(custom)}):
+            self.assertEqual(self.client.Credentials().path, custom / (
+                'credentials.dpapi' if os.name == 'nt' else 'credentials.json'))
+        with patch.dict(os.environ, {'XDG_CONFIG_HOME': str(custom), 'LOCALAPPDATA': str(custom)}):
             with patch.dict(os.environ, {'CONTEXTHUB_CONFIG_DIR': ''}):
-                self.assertEqual(self.client.Credentials().path, custom / 'contexthub' / 'credentials.json')
+                expected = custom / 'ContextHub' / 'credentials.dpapi' if os.name == 'nt' else custom / 'contexthub' / 'credentials.json'
+                self.assertEqual(self.client.Credentials().path, expected)
         origin = 'https://example.com'
         self.credentials.set(origin, self.record(expires_at=time.time() - 1))
         self.assertIsNone(self.credentials.get(origin))
@@ -245,7 +249,8 @@ class HubClientTests(unittest.TestCase):
         peer = self.peer()
         self.credentials.set(peer.origin, self.record(expires_at=time.time() - 10))
         self.client.HubClient(peer.origin, self.credentials).logout()
-        self.assertNotIn(peer.origin, json.loads(self.credentials.path.read_text())['hubs'])
+        with self.credentials._locked() as directory:
+            self.assertNotIn(peer.origin, self.credentials._load(directory)['hubs'])
         self.assertEqual(peer.requests, [])
 
     def test_server_error_does_not_echo_login_password_or_terminal_escapes(self):

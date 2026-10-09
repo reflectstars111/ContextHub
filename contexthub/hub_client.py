@@ -22,6 +22,7 @@ from .package import MAX_ARCHIVE_BYTES
 DEFAULT_HUB = 'https://contexthub.reflectstars.dev'
 MAX_CREDENTIAL_BYTES = 1024 * 1024
 _TOKEN = re.compile(r'[A-Za-z0-9_-]{20,512}\Z')
+_IS_WINDOWS = os.name == 'nt'
 
 
 class HubClientError(Exception):
@@ -84,9 +85,18 @@ class Credentials:
     def __init__(self, path=None):
         if path is None:
             config = os.environ.get('CONTEXTHUB_CONFIG_DIR')
-            directory = Path(config) if config else Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'contexthub'
-            path = directory / 'credentials.json'
+            if _IS_WINDOWS:
+                directory = Path(config) if config else Path(
+                    os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local') / 'ContextHub'
+                path = directory / 'credentials.dpapi'
+            else:
+                directory = Path(config) if config else Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'contexthub'
+                path = directory / 'credentials.json'
         self.path = Path(os.path.abspath(Path(path).expanduser()))
+        self._windows_storage = None
+        if _IS_WINDOWS:
+            from .windows_credentials import WindowsCredentialStorage
+            self._windows_storage = WindowsCredentialStorage(self.path)
 
     @staticmethod
     def _private(info, directory=False):
@@ -99,6 +109,10 @@ class Credentials:
 
     @contextlib.contextmanager
     def _locked(self, create=False):
+        if self._windows_storage is not None:
+            with self._windows_storage.locked(create=create) as directory:
+                yield directory
+            return
         directory = self.path.parent
         if create:
             directory.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -123,16 +137,21 @@ class Credentials:
         finally:
             os.close(descriptor)
 
-    def _load(self):
-        try:
-            descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
-        except FileNotFoundError:
-            return {'version': 1, 'hubs': {}}
-        except OSError as exc:
-            raise ValueError('无法安全读取登录凭据；不允许符号链接') from exc
-        with os.fdopen(descriptor, 'rb') as stream:
-            self._private(os.fstat(stream.fileno()))
-            raw = stream.read(MAX_CREDENTIAL_BYTES + 1)
+    def _load(self, directory=None):
+        if self._windows_storage is not None:
+            raw = self._windows_storage.read(directory)
+            if raw is None:
+                return {'version': 1, 'hubs': {}}
+        else:
+            try:
+                descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                return {'version': 1, 'hubs': {}}
+            except OSError as exc:
+                raise ValueError('无法安全读取登录凭据；不允许符号链接') from exc
+            with os.fdopen(descriptor, 'rb') as stream:
+                self._private(os.fstat(stream.fileno()))
+                raw = stream.read(MAX_CREDENTIAL_BYTES + 1)
         try:
             if len(raw) > MAX_CREDENTIAL_BYTES:
                 raise ValueError
@@ -148,7 +167,11 @@ class Credentials:
         except (ValueError, TypeError, UnicodeError) as exc:
             raise ValueError('登录凭据文件无效，请检查配置或重新登录') from exc
 
-    def _save(self, value):
+    def _save(self, value, directory=None):
+        if self._windows_storage is not None:
+            raw = (json.dumps(value, ensure_ascii=False) + '\n').encode('utf-8')
+            self._windows_storage.write(directory, raw)
+            return
         descriptor, name = tempfile.mkstemp(prefix='.credentials-', suffix='.tmp', dir=self.path.parent)
         try:
             with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
@@ -165,7 +188,7 @@ class Credentials:
     def get(self, origin):
         origin = normalize_hub(origin)
         with self._locked() as exists:
-            value = self._load()['hubs'].get(origin) if exists else None
+            value = self._load(exists)['hubs'].get(origin) if exists else None
             if value is None or value['expires_at'] <= time.time():
                 return None
             return _record(value)
@@ -174,20 +197,20 @@ class Credentials:
         origin, record = normalize_hub(origin), _record(record)
         if record['cookie_name'].startswith('__Host-') and not origin.startswith('https://'):
             raise ValueError('安全会话只能用于 HTTPS')
-        with self._locked(create=True):
-            value = self._load()
+        with self._locked(create=True) as directory:
+            value = self._load(directory)
             value['hubs'][origin] = record
             if len(value['hubs']) > 128:
                 raise ValueError('保存的 Hub 登录记录过多，请先退出不再使用的 Hub')
-            self._save(value)
+            self._save(value, directory)
 
     def remove(self, origin):
         origin = normalize_hub(origin)
         with self._locked() as exists:
             if exists:
-                value = self._load()
+                value = self._load(exists)
                 if value['hubs'].pop(origin, None) is not None:
-                    self._save(value)
+                    self._save(value, exists)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

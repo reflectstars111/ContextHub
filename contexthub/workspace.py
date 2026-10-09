@@ -23,6 +23,7 @@ from .package import (MAX_ARCHIVE_BYTES, MAX_CONVERSATION_BYTES,
                       PackageError, _json_bytes, _load_json, build_package,
                       read_package)
 from .revisions import build_revision, compare_packages
+from . import safe_fs as fs
 
 
 class WorkspaceError(ValueError):
@@ -48,24 +49,16 @@ def _filename(identifier):
 
 
 def _directory(path):
-    """Open every path component without following links, including parents."""
-    absolute = os.path.abspath(os.fspath(path))
-    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    """Anchor every path component without following links, including parents."""
     try:
-        for component in Path(absolute).parts[1:]:
-            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                            dir_fd=fd)
-            os.close(fd)
-            fd = child
-        return fd
+        return fs.directory(path)
     except OSError as exc:
-        os.close(fd)
-        raise WorkspaceError('工作目录必须存在，且路径不得包含符号链接') from exc
+        raise WorkspaceError('工作目录必须存在，且路径不得包含符号链接、junction 或特殊路径') from exc
 
 
 def _regular(fd, name, *, missing=False):
     try:
-        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        info = fs.stat_entry(fd, name)
     except FileNotFoundError:
         if missing:
             return None
@@ -79,7 +72,7 @@ def _read(fd, name, limit, *, missing=False):
     if _regular(fd, name, missing=missing) is None:
         return None
     try:
-        handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        handle = fs.open_file(fd, name, os.O_RDONLY)
         try:
             info = os.fstat(handle)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
@@ -98,23 +91,27 @@ def _read(fd, name, limit, *, missing=False):
 def _atomic(fd, name, data, *, expected=_UNCHECKED):
     _regular(fd, name, missing=True)
     temporary = '.tmp-' + uuid.uuid4().hex
-    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                     0o600, dir_fd=fd)
+    handle = fs.open_file(fd, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     try:
         with os.fdopen(handle, 'wb', closefd=False) as stream:
             stream.write(data)
             stream.flush()
             os.fsync(handle)
+        # Windows refuses to rename an open file. Close the flushed temporary
+        # handle before the replace; the anchored parent directory stays held.
+        os.close(handle)
+        handle = None
         # rename replaces the directory entry, never the target of a link.
         _regular(fd, name, missing=True)
         if expected is not _UNCHECKED:
             _check_snapshot(fd, name, expected)
-        os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
-        os.fsync(fd)
+        fs.replace(fd, temporary, name)
+        fs.sync_dir(fd)
     finally:
-        os.close(handle)
+        if handle is not None:
+            os.close(handle)
         try:
-            os.unlink(temporary, dir_fd=fd)
+            fs.unlink(fd, temporary)
         except FileNotFoundError:
             pass
 
@@ -167,7 +164,7 @@ class Workspace:
         created = False
         try:
             try:
-                os.mkdir(target.name, 0o700, dir_fd=parent)
+                fs.mkdir(parent, target.name)
                 created = True
             except FileExistsError:
                 pass
@@ -175,44 +172,43 @@ class Workspace:
             try:
                 for name in ('.contexthub', 'library.json', 'conversations'):
                     try:
-                        os.stat(name, dir_fd=root, follow_symlinks=False)
+                        fs.stat_entry(root, name)
                     except FileNotFoundError:
                         continue
                     raise WorkspaceError(f'初始化不会覆盖已有路径：{name}')
-                os.mkdir('.contexthub', 0o700, dir_fd=root)
-                meta = os.open('.contexthub', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                               dir_fd=root)
+                fs.mkdir(root, '.contexthub')
+                meta = fs.child_dir(root, '.contexthub')
                 try:
                     for name in ('objects', 'commits', 'backups'):
-                        os.mkdir(name, 0o700, dir_fd=meta)
+                        fs.mkdir(meta, name)
                     state = {'schema_version': 1, 'head': None, 'index': None,
                              'remote': None, 'managed': ['library.json'], 'transaction': None}
                     _atomic(meta, 'state.json', _json_bytes(state))
-                    os.mkdir('conversations', 0o700, dir_fd=root)
+                    fs.mkdir(root, 'conversations')
                     _atomic(root, 'library.json', _json_bytes(library))
-                    os.fsync(root)
+                    fs.sync_dir(root)
                 finally:
-                    os.close(meta)
+                    fs.close(meta)
             finally:
-                os.close(root)
+                fs.close(root)
         except Exception:
             # A partial initialization is left intact for inspection; existing
             # project files are never removed during cleanup.
             if created:
                 try:
-                    os.rmdir(target.name, dir_fd=parent)
+                    fs.rmdir(parent, target.name)
                 except OSError:
                     pass
             raise
         finally:
-            os.close(parent)
+            fs.close(parent)
         return cls(target)
 
     @classmethod
     def find(cls, path='.'):
         current = Path(os.path.abspath(os.fspath(path)))
         probe = _directory(current)
-        os.close(probe)
+        fs.close(probe)
         for candidate in (current, *current.parents):
             marker = candidate / '.contexthub'
             if marker.exists() or marker.is_symlink():
@@ -231,24 +227,19 @@ class Workspace:
         descriptors = []
         try:
             if outer:
-                try:
-                    import fcntl
-                except ImportError as exc:
-                    raise WorkspaceError('本地工作区当前需要 Linux/POSIX 文件锁') from exc
                 root = _directory(self.root)
                 descriptors.append(root)
                 for name in ('.contexthub', 'conversations'):
-                    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+                    fd = fs.child_dir(root, name)
                     descriptors.append(fd)
                 meta, conversations = descriptors[1:]
-                lock = os.open('lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-                               0o600, dir_fd=meta)
+                lock = fs.open_file(meta, 'lock', os.O_RDWR | os.O_CREAT)
                 descriptors.append(lock)
                 info = os.fstat(lock)
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     raise WorkspaceError('工作区锁文件不是独立的常规文件')
                 try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fs.lock(lock)
                 except BlockingIOError as exc:
                     raise WorkspaceError('工作区正被另一个操作使用，请稍后重试') from exc
                 self._fds = (root, meta, conversations)
@@ -259,12 +250,12 @@ class Workspace:
             finally:
                 self._depth -= 1
         except OSError as exc:
-            raise WorkspaceError(f'工作区文件操作失败：{exc.strerror}') from exc
+            raise WorkspaceError(f'工作区文件操作失败：{exc.strerror or str(exc)}') from exc
         finally:
             if outer:
                 self._fds = None
                 for fd in reversed(descriptors):
-                    os.close(fd)
+                    fs.close(fd)
             self._mutex.release()
 
     def _state(self):
@@ -299,11 +290,11 @@ class Workspace:
 
     @contextmanager
     def _subdir(self, name):
-        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._fds[1])
+        fd = fs.child_dir(self._fds[1], name)
         try:
             yield fd
         finally:
-            os.close(fd)
+            fs.close(fd)
 
     def _object(self, digest):
         if not isinstance(digest, str) or not _HASH.fullmatch(digest):
@@ -357,16 +348,16 @@ class Workspace:
         _atomic(self._fds[1], 'state.json', _json_bytes(state))
 
     def _cleanup_journal(self, journal):
-        os.unlink('journal.json', dir_fd=self._fds[1])
-        os.fsync(self._fds[1])
+        fs.unlink(self._fds[1], 'journal.json')
+        fs.sync_dir(self._fds[1])
         with self._subdir('backups') as fd:
             for entry in journal['files']:
                 if entry['backup']:
                     try:
-                        os.unlink(entry['backup'], dir_fd=fd)
+                        fs.unlink(fd, entry['backup'])
                     except FileNotFoundError:
                         pass
-            os.fsync(fd)
+            fs.sync_dir(fd)
 
     def _recover(self, *, preserve_external=False):
         raw = _read(self._fds[1], 'journal.json', MAX_METADATA_BYTES, missing=True)
@@ -410,10 +401,10 @@ class Workspace:
                     if data is None:
                         _check_snapshot(fd, name, expected)
                         try:
-                            os.unlink(name, dir_fd=fd)
+                            fs.unlink(fd, name)
                         except FileNotFoundError:
                             pass
-                        os.fsync(fd)
+                        fs.sync_dir(fd)
                     else:
                         _atomic(fd, name, data, expected=expected)
         self._cleanup_journal(journal)
@@ -454,10 +445,10 @@ class Workspace:
                 else:
                     _regular(fd, name, missing=True)
                     try:
-                        os.unlink(name, dir_fd=fd)
+                        fs.unlink(fd, name)
                     except FileNotFoundError:
                         pass
-                    os.fsync(fd)
+                    fs.sync_dir(fd)
             state['managed'] = sorted(files)
             state['transaction'] = transaction
             self._write_state(state)

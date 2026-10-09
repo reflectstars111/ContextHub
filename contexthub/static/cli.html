@@ -13,11 +13,28 @@
       <p class="eyebrow">CONVERSATIONS, VERSIONED.</p>
       <h1>在终端里，<br>让对话持续演化。</h1>
       <p class="lead">用熟悉的 add、commit、push 和 pull，管理你的 AI 对话。<br>本地整理，提交留档，与 ContextHub 同步。</p>
-      <div class="actions"><a class="button" href="/ctx.pyz" download>下载 ctx · 0.5.0</a><a href="#install">Linux 安装方法 ↓</a></div>
-      <p class="note">Linux · Python 3.12+ · 无第三方 Python 依赖 · MIT 开源</p>
+      <div class="actions"><a class="button" href="/ctx.pyz" download>下载 ctx · 0.6.0</a><a href="#windows">Windows 安装 ↓</a><a href="#install">Linux 安装 ↓</a></div>
+      <p class="note">Windows 预览版 / Linux · Python 3.12+ · 运行时无第三方 Python 依赖 · MIT 开源</p>
     </section>
     <div class="benefits"><article><span>01</span><h2>整理多种来源</h2><p>导入 Codex 对话包、Claude 和 DeepSeek 导出文件，在同一工作区管理。</p></article><article><span>02</span><h2>每次修改有记录</h2><p>先查看差异，再提交版本。提交保存在本机，运行 push 才会上传。</p></article><article><span>03</span><h2>跨机器继续整理</h2><p>克隆固定版本，拉取更新。发生分叉时停止同步，保留本地内容。</p></article></div>
-    <section id="install"><p class="eyebrow">GET STARTED</p><h2>一次安装，随时使用</h2><p>在 Linux 或 VS Code 远程终端中运行。先确认 <code>python3 --version</code> 为 3.12 或更新版本。</p>
+    <section id="windows"><p class="eyebrow">WINDOWS / POWERSHELL</p><h2>在 Windows 终端使用 ctx</h2><p>Windows 10 / 11 原生预览版，需要 Python 3.12+。适用于 PowerShell、CMD 和 VS Code 本地终端；无需 WSL。尚待真实 Windows CI 验收。</p>
+      <p>先检查 <code>py -3 --version</code>。下载安装脚本，查看内容后运行；安装到当前用户目录，不需要管理员权限。</p>
+<pre><code>Invoke-WebRequest https://contexthub.reflectstars.dev/install-ctx.ps1 -OutFile .\install-ctx.ps1
+Get-Content .\install-ctx.ps1
+.\install-ctx.ps1
+ctx --version
+ctx auth login --username 你的用户名</code></pre>
+      <p class="note">安装器需要带 pip 或 ensurepip 的完整 Python；检查 SHA-256 后，使用本机原生启动器创建 ctx.exe，并将安装目录加入用户 PATH；新开终端即可使用。不更改 PowerShell 执行策略。若当前策略禁止脚本，或使用精简 Python，可使用下面的直接运行方式。</p>
+<pre><code>Invoke-WebRequest https://contexthub.reflectstars.dev/ctx.pyz -OutFile .\ctx.pyz
+Invoke-WebRequest https://contexthub.reflectstars.dev/ctx.pyz.sha256 -OutFile .\ctx.pyz.sha256
+$expected = (Get-Content .\ctx.pyz.sha256 -Raw).Split(' ')[0].Trim()
+if ((Get-FileHash .\ctx.pyz -Algorithm SHA256).Hash -ne $expected) { throw "SHA-256 mismatch" }
+py -3 .\ctx.pyz --version
+py -3 .\ctx.pyz auth login --username 你的用户名</code></pre>
+      <p class="note">直接运行时，将后文的 ctx 替换为 py -3 C:\完整路径\ctx.pyz。安装目录为 %LOCALAPPDATA%\ContextHub\bin；登录会话由当前 Windows 用户加密保存。Windows 工作区使用本地磁盘普通目录，暂不支持网络共享、映射盘、链接或重解析点目录。</p>
+      <p><a href="/install-ctx.ps1" download>下载安装脚本</a> · <a href="/ctx.pyz.sha256">查看工具校验值</a></p>
+    </section>
+    <section id="install"><p class="eyebrow">GET STARTED</p><h2>Linux 安装</h2><p>在 Linux 或 VS Code 远程终端中运行。先确认 <code>python3 --version</code> 为 3.12 或更新版本。</p>
 <pre><code>mkdir -p ~/.local/bin
 curl -fS https://contexthub.reflectstars.dev/ctx.pyz -o ctx.pyz
 curl -fS https://contexthub.reflectstars.dev/ctx.pyz.sha256 -o ctx.pyz.sha256
@@ -27,7 +44,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ctx --version</code></pre>
       <p class="note">可将 PATH 设置加入 ~/.bashrc。升级时重新下载、校验并安装；本地工作区和登录配置保留。ctx.pyz 是包含 Python 源码和 MIT 许可证的 ZIP，可直接查看源码。</p>
     </section>
-    <section><h2>导入 → 提交 → 推送</h2><p>先在网站注册账号，再在终端登录。密码交互输入，登录会话按站点保存在用户配置目录。</p>
+    <section><h2>导入 → 提交 → 推送</h2><p>先在网站注册账号，再在终端登录。Windows 与 Linux 使用相同命令。密码交互输入，登录会话按站点保存在用户配置目录。</p>
 <pre><code>ctx auth login --username 你的用户名
 ctx init my-dialogues --title "我的对话库"
 cd my-dialogues
@@ -61,7 +78,7 @@ ctx log
 ctx export ../shared.contextpack</code></pre>
       <p class="note">Fork 默认私有，不改变原库。需要贡献回上游时，可创建公开 Fork，并在网站提交贡献请求。库的公开性创建后固定。</p>
     </section>
-    <section><h2>连接本机 Codex</h2><p>安装 Codex CLI 后，可以直接使用 ctx 的本地桥接命令。</p>
+    <section><h2>连接本机 Codex</h2><p>安装 Codex CLI 后，可以直接使用 ctx 的本地桥接命令。Windows 优先识别 codex.exe 和常见 npm 安装；找不到时，可将 CONTEXTHUB_CODEX_EXE 设为本机 codex.exe 完整路径。</p>
 <pre><code>ctx codex list
 ctx codex export --thread 会话ID --title "项目讨论" -o codex.contextpack
 ctx add codex.contextpack

@@ -10,8 +10,10 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import platform
 import queue
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -34,13 +36,51 @@ class CodexError(ValueError):
         self.code = code
 
 
+def _default_command(*, windows=None, machine=None):
+    """Resolve a native Windows executable without routing through cmd.exe."""
+    windows = os.name == 'nt' if windows is None else windows
+    override = os.environ.get('CONTEXTHUB_CODEX_EXE')
+    suffix = ['app-server', '--listen', 'stdio://']
+    if override:
+        executable = Path(override).expanduser()
+        if not executable.is_file() or (windows and executable.suffix.lower() != '.exe'):
+            raise CodexError('CONTEXTHUB_CODEX_EXE 必须指向已安装的 Codex 可执行文件（Windows 为 codex.exe）')
+        return [str(executable.resolve()), *suffix]
+    if not windows:
+        return ['codex', *suffix]
+    direct = shutil.which('codex.exe')
+    if direct:
+        return [direct, *suffix]
+    # npm on Windows exposes codex.cmd. Resolve its adjacent native optional
+    # package instead of letting shell metacharacters enter a batch launcher.
+    shim = shutil.which('codex.cmd')
+    if shim:
+        package = Path(shim).parent / 'node_modules' / '@openai' / 'codex'
+        architecture = (machine or platform.machine()).lower()
+        target, variant = (('aarch64', 'arm64') if architecture in ('arm64', 'aarch64')
+                           else ('x86_64', 'x64'))
+        triple = target + '-pc-windows-msvc'
+        roots = (package.parent / ('codex-win32-' + variant),
+                 package / 'node_modules' / '@openai' / ('codex-win32-' + variant), package)
+        for root in roots:
+            for binary_directory in ('bin', 'codex'):
+                candidate = root / 'vendor' / triple / binary_directory / 'codex.exe'
+                if candidate.is_file():
+                    return [str(candidate.resolve()), *suffix]
+    raise CodexError('未找到 Windows Codex 可执行文件。请先安装 Codex CLI，或设置 CONTEXTHUB_CODEX_EXE 为 codex.exe 的完整路径')
+
+
 class CodexClient:
     """Own one stdio app-server process, with bounded synchronous requests."""
 
     def __init__(self, command=None, timeout=30):
-        self.command = command or ["codex", "app-server", "--listen", "stdio://"]
+        self.command = command or _default_command()
         if isinstance(self.command, str):
+            if os.name == 'nt':
+                raise CodexError('Windows 自定义命令请传参数列表；可用 CONTEXTHUB_CODEX_EXE 指定 Codex 路径')
             self.command = shlex.split(self.command)
+        if os.name == 'nt' and Path(self.command[0]).suffix.lower() in ('.bat', '.cmd'):
+            raise CodexError('请直接使用可执行文件；不通过 Windows 批处理脚本启动 Codex')
         self.timeout = float(timeout)
         if self.timeout <= 0:
             raise ValueError("timeout must be positive")

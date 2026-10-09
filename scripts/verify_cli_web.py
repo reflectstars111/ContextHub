@@ -30,6 +30,11 @@ def main():
         staging = os.environ.get('CONTEXTHUB_STAGED_INDEX')
         if staging:
             shutil.copyfile(staging, static / 'index.html')
+        staged_static = os.environ.get('CONTEXTHUB_STAGED_STATIC')
+        if staged_static:
+            for file in Path(staged_static).iterdir():
+                if file.is_file() and file.suffix in ('.html', '.css', '.ps1'):
+                    shutil.copyfile(file, static / file.name)
         with patch('contexthub.server.STATIC', static), service(root / 'hub') as (_, url), sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
             page = browser.new_page(accept_downloads=True, viewport={'width': 1440, 'height': 1000})
@@ -38,9 +43,12 @@ def main():
             expect(page.locator('#cli-guide-link')).to_be_visible()
             page.locator('#cli-guide-link').click()
             expect(page.locator('h1')).to_contain_text('让对话持续演化')
+            expect(page.locator('#windows')).to_contain_text('PowerShell')
+            installer = page.request.get(url + '/install-ctx.ps1')
+            assert installer.ok and 'Get-HubOrigin' in installer.text()
             assert page.locator('pre').count() >= 5
             with page.expect_download() as info:
-                page.get_by_role('link', name='下载 ctx · 0.5.0').click()
+                page.get_by_role('link', name=f'下载 ctx · {__version__}').click()
             path = root / 'ctx.pyz'
             info.value.save_as(path)
             assert path.read_bytes() == cli_archive()
@@ -54,7 +62,7 @@ def main():
             page.screenshot(path=artifacts / 'ctx-guide-desktop.png', full_page=True)
             page.set_viewport_size({'width': 390, 'height': 844})
             page.goto(url + '/cli')
-            expect(page.get_by_role('link', name='下载 ctx · 0.5.0')).to_be_visible()
+            expect(page.get_by_role('link', name=f'下载 ctx · {__version__}')).to_be_visible()
             assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
             page.screenshot(path=artifacts / 'ctx-guide-mobile.png', full_page=True)
             browser.close()

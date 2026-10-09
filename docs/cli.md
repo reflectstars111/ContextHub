@@ -1,8 +1,38 @@
 # ctx：ContextHub 的终端工具
 
-适用 **Linux / 远程服务器 / VS Code 终端**，需要 Python 3.12+。管理对话不需要模型服务或第三方 Python 库；本地 Codex 桥接另需安装 Codex CLI。
+适用 **Linux / 远程服务器 / VS Code 终端**，0.6.0 新增 **Windows 10/11 原生预览版**，需要 Python 3.12+，无需 WSL。管理对话不需要模型服务或第三方 Python 库；本地 Codex 桥接另需安装 Codex CLI。Windows 内核路径、DPAPI 和锁已在 Windows Python + Wine 执行验证，原生 Windows CI 尚待运行，因此保留预览标记。
 
 ## 安装
+
+### Windows（PowerShell）
+
+使用带 pip 或 ensurepip 的完整 Python 安装；安装器复用其中的 Windows 原生启动器，不额外下载依赖。先运行 `py -3 --version`，确认使用 Python 3.12 或更新版本。下载安装脚本，查看内容后执行：
+
+```powershell
+Invoke-WebRequest https://contexthub.reflectstars.dev/install-ctx.ps1 -OutFile .\install-ctx.ps1
+Get-Content .\install-ctx.ps1
+.\install-ctx.ps1
+ctx --version
+```
+
+安装器仅操作当前用户目录 `%LOCALAPPDATA%\ContextHub\bin`，不需要管理员权限；检查 Python、下载 SHA-256 和工具版本后安装 `ctx.pyz` / `ctx.exe`，将该目录加入当前会话和用户 PATH。新终端可直接使用 `ctx`。升级时重新运行安装器；验证或替换失败时保留旧版本。支持 `-PythonExecutable 'C:\具体路径\python.exe'` 指定解释器，以及 `-InstallDir` 自定义目录。
+
+脚本不修改 PowerShell 执行策略。若策略禁止脚本，或使用不带 pip/ensurepip 的精简 Python，直接下载并校验工具后运行，无需放宽策略：
+
+```powershell
+Invoke-WebRequest https://contexthub.reflectstars.dev/ctx.pyz -OutFile .\ctx.pyz
+Invoke-WebRequest https://contexthub.reflectstars.dev/ctx.pyz.sha256 -OutFile .\ctx.pyz.sha256
+$expected = (Get-Content .\ctx.pyz.sha256 -Raw).Split(' ')[0].Trim()
+if ((Get-FileHash .\ctx.pyz -Algorithm SHA256).Hash -ne $expected) { throw 'SHA-256 mismatch' }
+py -3 .\ctx.pyz --version
+py -3 .\ctx.pyz auth login --username alice
+```
+
+此方式后续用 `py -3 C:\完整路径\ctx.pyz` 替换下文的 `ctx`。路径有空格时加引号。安装器还支持离线安装 `-ArchivePath .\ctx.pyz -Sha256 校验值`；自部署可使用 `-HubUrl https://自己的Hub`，运行时的站点选择仍使用 `--hub` 或 `CONTEXTHUB_HUB`。
+
+Windows 本地工作区和凭据目录仅支持普通本地磁盘路径；拒绝网络共享、网络映射盘、junction、符号链接和其他重解析点。不要将工作区放在依赖这些特性的同步目录中。此版本适配客户端，Hub 服务器的生产部署继续使用 Linux。
+
+### Linux
 
 网站提供[安装教程](https://contexthub.reflectstars.dev/cli)、[单文件工具](https://contexthub.reflectstars.dev/ctx.pyz)及 SHA-256 文件：
 
@@ -36,7 +66,9 @@ export CONTEXTHUB_HUB=https://hub.example.com
 
 密码交互输入，不作为命令参数、不保存。自动化可用 `--password-stdin` 从安全的标准输入传入一行密码，避免将密码写入脚本或 shell 历史。会话最多有效 7 天，过期后重新登录。
 
-会话存储在 `~/.config/contexthub/credentials.json`；支持 `XDG_CONFIG_HOME` 或独立 `CONTEXTHUB_CONFIG_DIR`。配置目录权限 700、文件 600，按完整站点来源（协议、域名和端口）隔离。凭据文件含可登录的会话令牌，应按秘密管理，不进入工作区或上传包。HTTP 仅允许字面 loopback IP（例如 `http://127.0.0.1:8765`）；客户端拒绝重定向，避免将内容或凭据转发给其他站点。退出会清除本地令牌，并尝试撤销服务器会话。
+Linux 会话存储在 `~/.config/contexthub/credentials.json`，配置目录权限 700、文件 600；支持 `XDG_CONFIG_HOME`。Windows 默认为 `%LOCALAPPDATA%\ContextHub\credentials.dpapi`，通过当前用户 DPAPI 加密，无明文降级；更换 Windows 账号或机器需重新登录，不能靠复制该文件迁移会话。两者均支持 `CONTEXTHUB_CONFIG_DIR` 覆盖，且按完整站点来源（协议、域名和端口）隔离。
+
+凭据文件含登录会话，应按秘密管理，不进入工作区或上传包。HTTP 仅允许字面 loopback IP（例如 `http://127.0.0.1:8765`）；客户端拒绝重定向，避免将内容或凭据转发给其他站点。退出会清除本地令牌，并尝试撤销服务器会话。
 
 ## 本地导入与提交
 
@@ -137,6 +169,14 @@ ctx codex import ../downloaded.contextpack --cwd /absolute/path/to/project
 ```
 
 Codex 桥接复用已有连接器实现：选择显式会话，不自动遍历上传历史；导入创建新上下文，不触发模型调用。它不恢复原始 UI 时间线、附件、工具状态、权限或项目文件。后续继续任务使用本机 Codex 配置，详见[迁移验证记录](verification/2026-10-09-transfer.md)。Claude/DeepSeek 当前可导入管理和导出可移植包，不承诺回导原平台继续聊天。
+
+Windows 会识别 PATH 中的 `codex.exe` 及常见 npm 安装目录中的原生程序，不通过 `codex.cmd` shell 启动。无法自动找到时，在 PowerShell 中设置 `$env:CONTEXTHUB_CODEX_EXE = 'C:\完整路径\codex.exe'`；不会下载或自动安装 Codex。本次仅验证原生程序定位、协议合成测试及 dry-run，未在真实 Windows 上读取会话或调用模型。
+
+## Windows 卸载与验收
+
+先 `ctx auth logout`，再删除 `%LOCALAPPDATA%\ContextHub\bin` 并从用户 PATH 移除该项。不要将工作区放在安装目录内；卸载不会主动删除其他位置的对话库。若需要清除本机登录配置，再单独删除 `credentials.dpapi`。
+
+仓库提供 `.github/workflows/cli-cross-platform.yml`，在 Ubuntu/Windows × Python 3.12/3.13 验证 CLI、锁、DPAPI、junction、中文路径及 PowerShell 安装器。当前工作区未连接 GitHub 远端，因此不能声称 CI 已执行。Wine 不提供的链接创建能力会明确标为跳过，真实 Windows 不跳过对应的 junction 检查。
 
 ## 脚本使用与限制
 

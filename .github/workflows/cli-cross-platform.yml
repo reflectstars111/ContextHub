@@ -1,0 +1,47 @@
+name: ContextHub CLI across platforms
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Check Git for temporary Hub integration tests
+        run: git --version
+      - name: Test CLI, workspace, transfers, packages and distribution
+        run: >-
+          python -m unittest -v
+          tests.test_ctx tests.test_workspace tests.test_hub_client
+          tests.test_package tests.test_revisions tests.test_codex
+          tests.test_distribution tests.test_installer_core tests.test_safe_fs
+      - name: Test native Windows locks, credentials and offline installation
+        run: python -m unittest discover -v -s tests -p "test_windows*.py"
+      - name: Build CLI artifact
+        run: python -m contexthub.distribution --output ctx.pyz
+      - name: Run archive outside the checkout
+        shell: python
+        run: |
+          import pathlib, subprocess, sys, tempfile
+          archive = pathlib.Path('ctx.pyz').resolve()
+          with tempfile.TemporaryDirectory() as cwd:
+              subprocess.run([sys.executable, str(archive), '--version'], cwd=cwd, check=True)

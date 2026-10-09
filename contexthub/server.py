@@ -378,6 +378,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {'error': f'操作未完成（{type(exc).__name__}），请查看终端诊断或稍后重试'})
 
     def _static(self, path):
+        if path == '/install-ctx.ps1':
+            return self._send(200, (STATIC / 'install-ctx.ps1').read_bytes(),
+                              'text/plain; charset=utf-8',
+                              {'Content-Disposition': 'attachment; filename="install-ctx.ps1"'})
         if path in ('/ctx.pyz', '/ctx.pyz.sha256'):
             from .distribution import cli_archive, cli_checksum
             if path.endswith('.sha256'):

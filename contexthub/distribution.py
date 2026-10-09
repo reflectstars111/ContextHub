@@ -3,13 +3,15 @@ from functools import lru_cache
 import hashlib
 import io
 from pathlib import Path
+import sys
 import zipfile
 
 MODULES = ('__init__', '__main__', 'codex', 'ctx', 'hub_client', 'workspace',
-           'importers', 'package', 'platforms', 'revisions')
+           'importers', 'package', 'platforms', 'revisions', 'safe_fs', 'windows_credentials',
+           'windows_launcher')
 ENTRY_POINT = '''import sys
-if sys.version_info < (3, 12) or sys.platform != 'linux':
-    sys.exit('ctx requires Linux and Python 3.12 or newer.')
+if sys.version_info < (3, 12) or sys.platform not in ('linux', 'win32'):
+    sys.exit('ctx requires Windows or Linux with Python 3.12 or newer.')
 from contexthub.ctx import main
 sys.exit(main())
 '''
@@ -44,5 +46,6 @@ if __name__ == '__main__':
     target = Path(args.output)
     with target.open('xb') as file:
         file.write(cli_archive())
-    target.chmod(0o755)
+    if sys.platform != 'win32':
+        target.chmod(0o755)
     print(cli_checksum(), end='')

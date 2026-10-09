@@ -39,9 +39,24 @@ class WorkspaceTests(unittest.TestCase):
 
     def edit(self, text, identifier='c1'):
         path = self.file(identifier)
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding='utf-8'))
         value['messages'][0]['content'] = text
         path.write_text(json.dumps(value))
+
+    def symlink(self, path, target, *, directory=False):
+        try:
+            path.symlink_to(target, target_is_directory=directory)
+        except OSError as exc:
+            if os.name == 'nt' and getattr(exc, 'winerror', None) == 1314:
+                self.skipTest('Windows symlink creation requires Developer Mode; junctions are tested separately')
+            raise
+        if not os.path.lexists(path):
+            # Wine 9's CreateSymbolicLinkW can report success without creating
+            # the entry. A native Windows runner must never silently skip it.
+            import ctypes
+            if os.name == 'nt' and hasattr(ctypes.WinDLL('ntdll'), 'wine_get_version'):
+                self.skipTest('Wine did not create the requested symbolic link; native Windows CI covers this')
+            self.fail('Symlink creation succeeded without creating a directory entry')
 
     def first(self):
         self.workspace.add(pack())
@@ -58,7 +73,7 @@ class WorkspaceTests(unittest.TestCase):
         workspace.add(pack())
         workspace.commit('Add selected conversation')
         self.assertNotIn(b'do-not-upload', workspace.package_bytes())
-        self.assertEqual((existing / 'credentials.txt').read_text(), 'do-not-upload')
+        self.assertEqual((existing / 'credentials.txt').read_text(encoding='utf-8'), 'do-not-upload')
         self.assertEqual(workspace.status()['conversations'], 1)
         with self.assertRaises(WorkspaceError):
             Workspace.init(existing, 'Must not overwrite')
@@ -142,7 +157,7 @@ class WorkspaceTests(unittest.TestCase):
         self.workspace.add(pack('second', 'c2'))
         self.workspace.commit('two conversations')
         library_path = self.root / 'library.json'
-        library = json.loads(library_path.read_text())
+        library = json.loads(library_path.read_text(encoding='utf-8'))
         library['conversation_ids'] = ['c2']
         library_path.write_text(json.dumps(library))
         self.workspace.stage()
@@ -161,7 +176,7 @@ class WorkspaceTests(unittest.TestCase):
         (self.root / 'notes.txt').write_text('untracked notes')
         self.workspace.checkout_remote(pack('new remote'), remote('v2'), expected_head=first)
         self.assertEqual(self.workspace.log()[0]['parent'], first)
-        self.assertEqual((self.root / 'notes.txt').read_text(), 'untracked notes')
+        self.assertEqual((self.root / 'notes.txt').read_text(encoding='utf-8'), 'untracked notes')
         self.assertEqual(self.workspace.status()['ahead'], 0)
         self.assertEqual(self.workspace.remote['version_id'], 'v2')
 
@@ -201,7 +216,7 @@ class WorkspaceTests(unittest.TestCase):
         self.file().write_text('precious untracked file')
         with self.assertRaises(WorkspaceError):
             self.workspace.checkout_remote(pack(), remote())
-        self.assertEqual(self.file().read_text(), 'precious untracked file')
+        self.assertEqual(self.file().read_text(encoding='utf-8'), 'precious untracked file')
         self.assertIsNone(self.workspace.head)
 
     def test_symlink_and_hardlink_working_files_are_rejected(self):
@@ -209,25 +224,25 @@ class WorkspaceTests(unittest.TestCase):
         outside = self.parent / 'outside.txt'
         outside.write_text('protected')
         self.file().unlink()
-        self.file().symlink_to(outside)
+        self.symlink(self.file(), outside)
         with self.assertRaises(WorkspaceError):
             self.workspace.stage()
-        self.assertEqual(outside.read_text(), 'protected')
+        self.assertEqual(outside.read_text(encoding='utf-8'), 'protected')
         self.file().unlink()
         os.link(outside, self.file())
         with self.assertRaises(WorkspaceError):
             self.workspace.stage()
-        self.assertEqual(outside.read_text(), 'protected')
+        self.assertEqual(outside.read_text(encoding='utf-8'), 'protected')
 
     def test_symlink_directories_and_metadata_are_rejected(self):
         alias = self.parent / 'alias'
-        alias.symlink_to(self.root, target_is_directory=True)
+        self.symlink(alias, self.root, directory=True)
         with self.assertRaises(WorkspaceError):
             Workspace.find(alias)
         external = self.parent / 'external'
         external.mkdir()
         (self.root / 'conversations').rmdir()
-        (self.root / 'conversations').symlink_to(external, target_is_directory=True)
+        self.symlink(self.root / 'conversations', external, directory=True)
         with self.assertRaises(WorkspaceError):
             self.workspace.add(pack())
         self.assertEqual(list(external.iterdir()), [])
@@ -237,10 +252,10 @@ class WorkspaceTests(unittest.TestCase):
         external.write_text('protected')
         state = self.root / '.contexthub' / 'state.json'
         state.unlink()
-        state.symlink_to(external)
+        self.symlink(state, external)
         with self.assertRaises(WorkspaceError):
             self.workspace.status()
-        self.assertEqual(external.read_text(), 'protected')
+        self.assertEqual(external.read_text(encoding='utf-8'), 'protected')
 
     def test_object_tampering_is_detected(self):
         first = self.first()
@@ -258,7 +273,8 @@ class WorkspaceTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-c',
                                      'from contexthub.workspace import Workspace; '
                                      'import sys; Workspace(sys.argv[1]).status()', str(self.root)],
-                                    capture_output=True, text=True)
+                                    capture_output=True, text=True, encoding='utf-8',
+                                    env=dict(os.environ, PYTHONIOENCODING='utf-8'))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('工作区正被另一个操作使用', result.stderr)
         self.assertIsNone(Workspace(self.root).head)
@@ -339,7 +355,7 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(WorkspaceError):
             self.workspace.checkout_remote(pack('other'), switched)
         state_path = self.root / '.contexthub' / 'state.json'
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding='utf-8'))
         state['managed'] = [{}]
         state_path.write_text(json.dumps(state))
         with self.assertRaises(WorkspaceError):
@@ -365,7 +381,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_protected_metadata_edits_are_dirty_until_explicit_staging(self):
         self.workspace.checkout_remote(pack(), remote())
-        original = json.loads(self.file().read_text())
+        original = json.loads(self.file().read_text(encoding='utf-8'))
         mutations = [
             lambda item: item['source'].update(platform='deepseek'),
             lambda item: item['messages'][0].update(provenance='human_authored'),
@@ -380,7 +396,7 @@ class WorkspaceTests(unittest.TestCase):
                 self.assertTrue(self.workspace.status()['modified'])
                 with self.assertRaises(WorkspaceError):
                     self.workspace.checkout_remote(pack('new remote'), remote('v2'))
-                self.assertEqual(json.loads(self.file().read_text()), item)
+                self.assertEqual(json.loads(self.file().read_text(encoding='utf-8')), item)
                 self.workspace.stage()
                 self.assertFalse(self.workspace.status()['modified'])
                 self.assertFalse(self.workspace.status()['staged'])
@@ -393,14 +409,14 @@ class WorkspaceTests(unittest.TestCase):
         self.workspace.stage()
         commit = self.workspace.commit('Audited edit')
         self.workspace.mark_pushed(remote('v2', commit['id']), commit['id'])
-        item = json.loads(self.file().read_text())
+        item = json.loads(self.file().read_text(encoding='utf-8'))
         self.assertTrue(item['annotations'])
         item.pop('annotations')
         self.file().write_text(json.dumps(item))
         self.assertTrue(self.workspace.status()['modified'])
         with self.assertRaises(WorkspaceError):
             self.workspace.checkout_remote(pack('new remote'), remote('v3'))
-        self.assertNotIn('annotations', json.loads(self.file().read_text()))
+        self.assertNotIn('annotations', json.loads(self.file().read_text(encoding='utf-8')))
 
     def test_concurrent_editor_save_before_stage_or_add_is_preserved(self):
         self.first()
@@ -419,7 +435,7 @@ class WorkspaceTests(unittest.TestCase):
                             self.workspace.stage()
                         else:
                             self.workspace.add(pack('other conversation', 'c2'))
-                self.assertEqual(json.loads(self.file().read_text())['messages'][0]['content'], 'new external edit')
+                self.assertEqual(json.loads(self.file().read_text(encoding='utf-8'))['messages'][0]['content'], 'new external edit')
                 self.assertEqual(self.workspace.package_bytes('INDEX'), prior_index)
                 self.assertFalse(self.file('c2').exists())
 
@@ -436,14 +452,14 @@ class WorkspaceTests(unittest.TestCase):
             nonlocal injected
             if name == 'library.json' and not injected:
                 injected = True
-                value = json.loads(library_path.read_text())
+                value = json.loads(library_path.read_text(encoding='utf-8'))
                 value['title'] = 'Editor saved concurrently'
                 library_path.write_text(json.dumps(value))
             return real_atomic(fd, name, data, **kwargs)
         with patch.object(module, '_atomic', side_effect=edit_during_replace):
             with self.assertRaisesRegex(WorkspaceError, '操作期间被其他程序修改'):
                 self.workspace.stage()
-        self.assertEqual(json.loads(library_path.read_text())['title'], 'Editor saved concurrently')
+        self.assertEqual(json.loads(library_path.read_text(encoding='utf-8'))['title'], 'Editor saved concurrently')
         self.assertEqual(self.file().read_bytes(), previous_conversation)
         self.assertEqual(self.workspace.package_bytes('INDEX'), previous_index)
         self.assertFalse((self.root / '.contexthub' / 'journal.json').exists())

@@ -26,8 +26,10 @@ class DistributionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'ctx.pyz'
             path.write_bytes(blob)
-            path.chmod(0o755)
-            result = subprocess.run([str(path), '--version'], cwd=directory, capture_output=True, text=True)
+            if sys.platform != 'win32':
+                path.chmod(0o755)
+            command = [sys.executable, str(path)] if sys.platform == 'win32' else [str(path)]
+            result = subprocess.run([*command, '--version'], cwd=directory, capture_output=True, text=True, encoding='utf-8')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(__version__, result.stdout)
             pack = Path(directory) / 'sample.contextpack'
@@ -47,7 +49,7 @@ class DistributionHTTPTests(unittest.TestCase):
     request = helpers.ServerTests.request
 
     def test_public_install_guide_archive_and_checksum(self):
-        for path in ('/cli', '/cli.css'):
+        for path in ('/cli', '/cli.css', '/install-ctx.ps1'):
             status, body = self.request('GET', path, auth=False)
             self.assertEqual(status, 200)
             self.assertTrue(body)

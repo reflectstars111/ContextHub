@@ -408,6 +408,11 @@ def _display(args, value):
 
 
 def main(argv=None):
+    if sys.platform == 'win32':
+        # Keep JSON and Chinese output readable when redirected in Windows.
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, 'reconfigure'):
+                stream.reconfigure(encoding='utf-8', errors='backslashreplace')
     argv = list(sys.argv[1:] if argv is None else argv)
     # A truly global output switch is convenient for shell aliases and scripts.
     as_json = '--json' in argv
