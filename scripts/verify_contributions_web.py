@@ -88,6 +88,7 @@ def main():
             bob.keyboard.press('Escape')
             bob.unroute(create_pattern)
             expect(bob.locator('#package-contributions')).to_contain_text('补充对话复用说明')
+            bob.locator('[data-repository-section="package-contributions-panel"]').click()
             bob.locator('#package-contributions').get_by_text('补充对话复用说明', exact=True).click()
             expect(bob.locator('#contribution-view')).to_be_visible()
             expect(bob.locator('#contribution-status')).to_have_text('待合并')
@@ -105,6 +106,7 @@ def main():
             pending = []
             pattern = '**' + proposal_path
             bob.route(pattern, lambda route: pending.append(route))
+            bob.locator('[data-repository-section="package-contributions-panel"]').click()
             bob.locator('#package-contributions').get_by_text('补充对话复用说明', exact=True).click()
             bob.locator('#edit-package').click()
             bob.locator('#draft-title').fill('仍在编辑的草稿')
@@ -137,6 +139,7 @@ def main():
             bob.unroute(comment_pattern)
             bob.locator('#contribution-back').click()
             expect(bob.locator('#package-contributions')).to_contain_text('补充对话复用说明')
+            bob.locator('[data-repository-section="package-contributions-panel"]').click()
             bob.locator('#package-contributions').get_by_text('补充对话复用说明', exact=True).click()
             expect(bob.locator('#contribution-comment')).to_have_value('尚未提交的下一条评论')
             bob.locator('#contribution-comment').fill('')

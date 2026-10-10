@@ -1,7 +1,7 @@
 """Git-style local conversation workspaces and authenticated Hub transfer.
 
-Only explicitly imported conversations and managed workspace JSON are staged.
-No command scans an enclosing project or the user's native conversation store.
+Selected conversations and the Git working tree are staged together by default.
+Native capture reads selected Codex threads through its local public API.
 """
 
 from __future__ import annotations
@@ -48,8 +48,15 @@ def parser():
     command.add_argument('file')
     command.add_argument('--platform', choices=('auto', 'codex', 'chatgpt', 'claude', 'deepseek', 'other'), default='auto')
     command.add_argument('--mode', choices=('normalize', 'archive'), default='normalize')
-    command = sub.add_parser('add', help='导入指定文件；add . 暂存受管 JSON 的修改')
-    command.add_argument('files', nargs='+')
+    command = sub.add_parser('add', help='采集当前对话或导入文件；add . 刷新已跟踪对话并暂存')
+    command.add_argument('files', nargs='*')
+    code_options = command.add_mutually_exclusive_group()
+    code_options.add_argument('--code', help='要同时采集的 Git 工作区；默认当前项目')
+    code_options.add_argument('--no-code', action='store_true', help='此次只更新对话，保留已保存的代码快照')
+    command.add_argument('--codex', action='store_true', help='直接采集并跟踪本机 Codex 会话，无需导出文件')
+    command.add_argument('--thread', help='明确选择 Codex 会话；省略时识别当前会话或目录内唯一会话')
+    command.add_argument('--before-turn', help='仅采集指定轮次之前的历史；当前会话默认排除执行中的最后一轮')
+    command.add_argument('--no-refresh', action='store_true', help='与 add . 一起使用：只暂存本地 JSON，不读取 Codex')
     command.add_argument('--platform', choices=('auto', 'codex', 'chatgpt', 'claude', 'deepseek', 'other'), default='auto')
     command.add_argument('--mode', choices=('normalize', 'archive'), default='normalize')
     command.add_argument('--confirm-import', action='store_true', help='接受导入报告中的遗漏或原文存档提示')
@@ -75,7 +82,10 @@ def parser():
     command.add_argument('-m', '--message', required=True)
     command = sub.add_parser('restore', help='在新目录同步恢复指定版本的对话与关联代码')
     command.add_argument('ref')
-    command.add_argument('--code', required=True, help='包含关联提交的本地 Git 仓库')
+    command.add_argument('--code', help='旧式检查点所需的原 Git 仓库；内嵌代码快照无需此参数')
+    selection = command.add_mutually_exclusive_group()
+    selection.add_argument('--snapshot', help='选择包内的代码快照 ID')
+    selection.add_argument('--message', help='恢复指定消息关联的采集时代码；可用 --conversation 消歧')
     command.add_argument('--to', required=True, help='不存在的恢复目标目录')
     command.add_argument('--codex', action='store_true', help='恢复完成后导入本机 Codex')
     command.add_argument('--conversation', help='要导入 Codex 的对话 ID')
@@ -181,6 +191,7 @@ def _import_files(args):
     if len(args.files) > MAX_CONVERSATIONS:
         raise ValueError(f'一次最多选择 {MAX_CONVERSATIONS} 个文件')
     conversations, reports = {}, []
+    contains_code = False
     total_read = total_normalized = 0
     single_blob = None
     for name in args.files:
@@ -197,6 +208,7 @@ def _import_files(args):
             warning = '; '.join(report['warnings'])[:2000]
             preview = f'ctx inspect {quote_argument(path)} --platform {args.platform} --mode {args.mode}'
             raise ValueError(f'{path.name} 需要确认：{warning}\n请先使用 {preview} 检查，接受提示后添加 --confirm-import')
+        contains_code = contains_code or bool(package.get('code'))
         single_blob = blob
         reports.append({'file': str(path), 'import_report': report})
         for conversation in package['conversations']:
@@ -209,7 +221,87 @@ def _import_files(args):
             conversations[ident] = conversation
     if len(args.files) == 1:
         return single_blob, reports
+    if contains_code:
+        raise ValueError('含代码的对话包请逐个导入，避免合并来源不明的代码历史')
     return build_package(list(conversations.values()), '导入的对话'), reports
+
+
+def _working_code(ws, args, conversations, previous):
+    """Capture once per add, associating only the latest captured turn."""
+    if getattr(args, 'no_code', False):
+        return previous, {'skipped': '已选择仅更新对话'}
+    selected = getattr(args, 'code', None)
+    repository = Path(selected).absolute() if selected else ws.root
+    if not selected and not os.path.lexists(repository / '.git'):
+        return previous, {'skipped': '当前目录没有 Git 代码仓库；可用 --code 指定代码目录'}
+    from .code_capture import capture_code
+    bindings = []
+    for conversation in conversations:
+        messages = conversation['messages']
+        if not messages:
+            continue
+        latest = messages[-1]
+        provenance = latest.get('provenance')
+        turn = provenance.get('turn_id') if isinstance(provenance, dict) else None
+        selected_messages = ([m for m in messages if isinstance(m.get('provenance'), dict) and m['provenance'].get('turn_id') == turn]
+                             if turn else [latest])
+        bindings.extend({'conversation_id': conversation['id'], 'message_id': m['id']} for m in selected_messages)
+    report = {}
+    code = capture_code(repository, previous, bind_messages=bindings, report=report)
+    return code, report
+
+
+def _stage_working(ws, args):
+    with ws.locked():
+        package, _ = ws._work()
+        code, report = _working_code(ws, args, package['conversations'], package.get('code'))
+        ws.stage(code=code)
+        return {'status': ws.status(), 'imports': [], 'captures': [], 'code_capture': report}
+
+
+def _add(ws, args):
+    selected = args.codex or args.thread is not None
+    if args.no_refresh:
+        if args.files != ['.'] or selected or args.before_turn or args.replace:
+            raise ValueError('--no-refresh 请仅与 ctx add . 一起使用，不与采集或替换选项混用')
+        if args.platform != 'auto' or args.mode != 'normalize':
+            raise ValueError('ctx add . --no-refresh 不需要文件格式选项')
+        return _stage_working(ws, args)
+    if selected and args.files:
+        raise ValueError('直接采集 Codex 与导入文件请分别执行：ctx add --codex 或 ctx add 文件路径')
+    if '.' in args.files and args.files != ['.']:
+        raise ValueError('ctx add . 请单独运行；导入新文件时逐个指定文件路径')
+    if args.files and args.files != ['.']:
+        if args.before_turn:
+            raise ValueError('--before-turn 只用于 Codex 采集，不能用于导入文件')
+        blob, reports = _import_files(args)
+        with ws.locked():
+            package = read_package(blob)
+            current, _ = ws._work()
+            if package.get('code') and not (args.no_code or args.code):
+                code, report = package['code'], {'imported': True}
+            else:
+                code, report = _working_code(ws, args, package['conversations'], current.get('code'))
+            ws.add(blob, replace=args.replace, code=code)
+        return {'status': ws.status(), 'imports': reports, 'captures': [], 'code_capture': report}
+    if args.platform != 'auto' or args.mode != 'normalize' or args.confirm_import:
+        raise ValueError('直接采集或 ctx add . 不需要文件格式与 --confirm-import 选项')
+    # Holding the existing workspace lock spans capture and the one atomic
+    # publication of all selected sources. No partial batch is staged.
+    with ws.locked():
+        sources = None if selected else ws.sources()
+        if args.files == ['.'] and not sources:
+            if args.before_turn:
+                raise ValueError('尚未跟踪会话，请先 ctx add --codex；--before-turn 只用于采集')
+            return _stage_working(ws, args)
+        from .capture import collect_codex
+        captured = collect_codex(ws.root, thread_id=args.thread, before_turn=args.before_turn,
+                                 sources=sources or None)
+        package = read_package(captured['blob'])
+        current, _ = ws._work()
+        code, report = _working_code(ws, args, package['conversations'], current.get('code'))
+        status = ws.capture(captured['blob'], captured['sources'], replace=args.replace, code=code)
+        return {'status': status, 'imports': [], 'captures': captured['captures'], 'code_capture': report}
 
 
 def _clone(args):
@@ -338,7 +430,10 @@ def run(args):
                 'conversations': [{'id': conversation['id'], 'title': conversation['title'],
                                    'message_count': len(conversation['messages'])}
                                   for conversation in package['conversations']],
-                'compatibility': package['compatibility'], 'import_report': report}
+                'compatibility': package['compatibility'], 'import_report': report,
+                'code': ({'head': package['code']['head'], 'snapshots': len(package['code']['snapshots']),
+                          'files': len(next(s for s in package['code']['snapshots'] if s['id'] == package['code']['head'])['files'])}
+                         if package.get('code') else None)}
     if args.action == 'init':
         ws = Workspace.init(Path(args.directory), args.title, args.description)
         return {'directory': str(ws.root), 'status': ws.status()}
@@ -352,6 +447,12 @@ def run(args):
         from .code_sync import capture_checkpoint
         return capture_checkpoint(ws, args.code, args.message)
     if args.action == 'restore':
+        if not args.code:
+            from .code_sync import restore_embedded
+            return restore_embedded(ws, args.ref, args.to, snapshot=args.snapshot, message=args.message,
+                                    conversation=args.conversation, codex=args.codex, mode=args.mode, resume=args.resume)
+        if args.snapshot or args.message:
+            raise ValueError('--snapshot / --message 用于内嵌代码恢复，不与 --code 混用')
         from .code_sync import restore_pair
         return restore_pair(ws, args.ref, args.code, args.to, codex=args.codex,
                             conversation=args.conversation, mode=args.mode, resume=args.resume)
@@ -365,14 +466,7 @@ def run(args):
     if args.action == 'merge':
         return ws.merge(args.ref, args.message, args.resolved)
     if args.action == 'add':
-        if args.files == ['.']:
-            ws.stage()
-            return {'status': ws.status(), 'imports': []}
-        if '.' in args.files:
-            raise ValueError('ctx add . 请单独运行；导入新文件时逐个指定文件路径')
-        blob, reports = _import_files(args)
-        ws.add(blob, replace=args.replace)
-        return {'status': ws.status(), 'imports': reports}
+        return _add(ws, args)
     if args.action == 'status':
         return ws.status()
     if args.action == 'diff':
@@ -405,6 +499,10 @@ def _print_status(value):
     print(_safe(f"分支：{value.get('branch', 'main')}"))
     print(f"提交：{(value.get('head') or '尚无提交')[:16]}；对话：{value['conversations']}；待推送：{value['ahead']}")
     print(f"暂存修改：{'有' if value['staged'] else '无'}；未暂存修改：{'有' if value['modified'] else '无'}")
+    if value.get('code'):
+        print(f"代码：{value['code']['files']} 个文件；{value['code']['snapshots']} 个快照；{value['code']['head'][:12]}")
+    if value.get('sources'):
+        print(f"已跟踪 Codex 会话：{len(value['sources'])} 段；ctx add . 采集最新内容")
     if value.get('error'):
         print(_safe(value['error']))
     remote = value.get('remote')
@@ -421,6 +519,8 @@ def _display(args, value):
         print(_safe(f"{value['title']}：{value['conversation_count']} 段对话；来源：{', '.join(value['platforms'])}"))
         for conversation in value['conversations']:
             print(_safe(f"  {conversation['title']}（{conversation['message_count']} 条消息）"))
+        if value.get('code'):
+            print(f"包含代码：{value['code']['files']} 个文件，{value['code']['snapshots']} 个快照")
         warnings = list(dict.fromkeys(value['import_report'].get('warnings', []) + value['compatibility'].get('warnings', [])))
         for warning in warnings:
             print(_safe(f'提示：{warning}'))
@@ -433,6 +533,23 @@ def _display(args, value):
             print(_safe(f"已导入：{item['file']}"))
             for warning in item['import_report'].get('warnings', []):
                 print(_safe(f'导入提示：{warning}'))
+        for capture in value.get('captures', []):
+            print(_safe(f"已采集：{capture['title']}（{capture['message_count']} 条消息）"))
+            if capture.get('current_turn_excluded'):
+                print('已排除当前执行中的轮次；下次 add 时再收录已结束的内容。')
+            elif capture.get('before_turn'):
+                print('已按指定轮次截断，不包含该轮及之后的内容。')
+            if capture.get('redactions'):
+                print(f"已辅助脱敏 {len(capture['redactions'])} 处；推送前可用 ctx diff --staged 检查。")
+        if value.get('captures'):
+            print('采集用户与助手可见正文；中断轮次可能不完整，附件与工具状态不在快照内。')
+        report = value.get('code_capture', {})
+        if 'captured_files' in report:
+            print(f"已保存代码快照：{report['captured_files']} 个文件（包括未提交修改）")
+        if report.get('excluded'):
+            print(f"已排除 {len(report['excluded'])} 个本地状态或凭据路径；--json 可查看排除清单。")
+        if report.get('skipped'):
+            print(_safe(report['skipped']))
         _print_status(value.get('status', value))
     elif args.action == 'branch':
         for branch in value['branches']:
@@ -463,6 +580,15 @@ def _display(args, value):
                 for marker, key in (('-', 'before'), ('+', 'after')):
                     if message.get(key):
                         print(_safe(f"{marker} [{message[key]['role']}] " + message[key]['content'].replace('\n', '\n' + marker + ' ')))
+        if value.get('code'):
+            code = value['code']
+            counts = code['summary']
+            print(f"代码：新增 {counts['files_added']}，删除 {counts['files_removed']}，修改 {counts['files_modified']} 个文件")
+            for file in code['files']:
+                print(_safe(f"{file['status']}  {file['path']}"))
+                print(_safe(file['patch']) if not file['binary'] else '二进制文件内容已变更')
+            if code.get('truncated'):
+                print('代码差异已截断；完整文件保存在代码快照中。')
         if value.get('truncated'):
             print('差异内容较长，显示已截断；完整内容保存在受管 JSON 文件中。')
     elif args.action == 'export':

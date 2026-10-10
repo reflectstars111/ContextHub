@@ -3,7 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   mode: null, user: null, csrf: null, token: "", view: "library", authMode: "login",
-  packages: [], sessions: [], selected: new Set(), reader: null, conversationIndex: 0,
+  packages: [], sessions: [], selected: new Set(), reader: null, conversationIndex: 0, turnKey: null, turnPage: 0,
   inspectedFile: null, inspection: null, uploadInspectedFile: null, uploadSnapshot: null, uploadPending: false, uploadLimit: null, authIntent: null,
   packageRequest: 0, sessionRequest: 0, uploadInspection: 0, readerRequest: 0,
 };
@@ -310,6 +310,8 @@ function openReader(data) {
   state.readerRequest++;
   state.reader = data;
   state.conversationIndex = 0;
+  state.turnKey = null; state.turnPage = 0;
+  $("turn-search").value = "";
   const editable = data.kind === "local";
   $("reader-title").textContent = data.title || (editable ? "导出前，检查你的上下文。" : "未命名对话包");
   $("reader-description").textContent = data.description || (editable ? "编辑只作用于本次导出副本。请检查敏感内容，保存后会保留编辑记录。" : "完整保留对话正文、来源与兼容性说明。");
@@ -342,6 +344,7 @@ function renderConversationTabs() {
     const tab = action("", `conversation-tab${index === state.conversationIndex ? " active" : ""}`, () => {
       if (!requireSavedEditor()) return;
       state.conversationIndex = index;
+      state.turnKey = null; state.turnPage = 0; $("turn-search").value = "";
       renderConversationTabs(); renderConversation();
     });
     tab.append(node("span", "", conversation.title || `对话 ${index + 1}`), node("small", "", `${isSourceArchive(conversation) ? "原文存档 · " : ""}${(conversation.messages || []).length} 条消息`));
@@ -353,6 +356,83 @@ function currentConversation() { return state.reader && (state.reader.conversati
 function roleLabel(role) { return { user: "你", assistant: "助手", tool: "工具记录", system: "系统记录", developer: "开发者记录" }[role] || role || "未知角色"; }
 function provenanceRecord(conversation) {
   return { id: conversation.id, source: conversation.source || {}, context: conversation.context || "", tags: conversation.tags || [], annotations: conversation.annotations || [] };
+}
+// Selection is view state only; message order and export contents stay intact.
+function messageDate(message) {
+  const value = message.created_at || (message.provenance && message.provenance.created_at);
+  if (value === undefined || value === null || value === "") return null;
+  const date = new Date(typeof value === "number" && value < 1e12 ? value * 1000 : value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+function conversationTurns(conversation) {
+  const turns = [];
+  (conversation.messages || []).forEach((message, index) => {
+    const source = message.provenance && typeof message.provenance === "object" ? message.provenance : {};
+    const turnId = source.turn_id || null;
+    let turn = turns.at(-1);
+    if (!turn || (turnId && turn.sourceId !== turnId) || (!turnId && message.role === "user")) {
+      turn = { key: String(message.id || index), number: turns.length + 1, sourceId: turnId, entries: [], date: null, title: "" };
+      turns.push(turn);
+    }
+    turn.entries.push({ message, index });
+    if (!turn.date) turn.date = messageDate(message);
+    if (!turn.title || message.role === "user" && turn.entries.length === 1) turn.title = String(message.content || "").replace(/\s+/g, " ").slice(0, 70);
+  });
+  return turns;
+}
+function selectConversationMessage(conversation, messageId) {
+  const turn = conversationTurns(conversation).find((item) => item.entries.some(({ message }) => message.id === messageId));
+  if (!turn) return;
+  state.turnKey = turn.key;
+  state.turnPage = Math.floor(turn.entries.findIndex(({ message }) => message.id === messageId) / 20);
+  $("turn-search").value = "";
+}
+function renderTurnDirectory(conversation) {
+  const turns = conversationTurns(conversation), directory = $("turn-directory"), navigation = $("turn-navigation");
+  directory.replaceChildren(); navigation.replaceChildren();
+  const query = $("turn-search").value.trim().toLocaleLowerCase();
+  const matches = turns.filter((turn) => !query || turn.entries.some(({ message }) => String(message.content || "").toLocaleLowerCase().includes(query)));
+  let selected = matches.find((turn) => turn.key === state.turnKey) || matches.at(-1);
+  if (!selected) {
+    directory.append(node("p", "field-help", query ? "没有匹配的轮次" : "没有对话轮次"));
+    navigation.append(node("p", "field-help", query ? "换个关键词搜索，或清空搜索查看全部轮次。" : ""));
+    return [];
+  }
+  if (selected.key !== state.turnKey) state.turnPage = 0;
+  state.turnKey = selected.key;
+  const selectedDay = selected.date ? selected.date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }) : "时间未记录";
+  let day = null, group = null;
+  const choose = (turn) => {
+    if (!requireSavedEditor()) return;
+    state.turnKey = turn.key; state.turnPage = 0; renderConversation();
+  };
+  for (const turn of matches) {
+    const date = turn.date ? turn.date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }) : "时间未记录";
+    if (date !== day) {
+      day = date; group = node("details", "turn-day");
+      group.open = date === selectedDay;
+      group.append(node("summary", "", date)); directory.append(group);
+    }
+    const button = action("", `turn-item${turn === selected ? " active" : ""}`, () => choose(turn));
+    button.dataset.turnKey = turn.key;
+    button.setAttribute("aria-pressed", String(turn === selected));
+    button.append(node("span", "turn-item-title", turn.title || "空白消息"));
+    const time = turn.date ? turn.date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : `第 ${turn.number} 轮`;
+    button.append(node("small", "", `${time} · ${turn.entries.length} 条消息`)); group.append(button);
+  }
+  const position = matches.indexOf(selected), pages = Math.ceil(selected.entries.length / 20);
+  state.turnPage = Math.min(Math.max(0, state.turnPage), pages - 1);
+  const previous = action("← 上一轮", "button button-small", () => choose(matches[position - 1]));
+  const next = action("下一轮 →", "button button-small", () => choose(matches[position + 1]));
+  previous.disabled = position === 0; next.disabled = position === matches.length - 1;
+  navigation.append(previous, node("span", "turn-position", `第 ${selected.number} / ${turns.length} 轮 · ${selected.entries.length} 条消息`), next);
+  if (pages > 1) {
+    const older = action("较早消息", "button button-small", () => { if (requireSavedEditor()) { state.turnPage--; renderConversation(); } });
+    const newer = action("较新消息", "button button-small", () => { if (requireSavedEditor()) { state.turnPage++; renderConversation(); } });
+    older.disabled = state.turnPage === 0; newer.disabled = state.turnPage === pages - 1;
+    navigation.append(older, node("span", "field-help", `本轮第 ${state.turnPage + 1} / ${pages} 页`), newer);
+  }
+  return selected.entries.slice(state.turnPage * 20, (state.turnPage + 1) * 20);
 }
 function renderConversation() {
   const conversation = currentConversation();
@@ -368,7 +448,7 @@ function renderConversation() {
   $("save-archive").disabled = !archive || (conversation.messages || []).length !== 1;
   const editedArchive = archive && (conversation.messages || []).some((message) => (message.transformations || []).some((change) => change === "human_edited" || change && (change.kind === "human_edited" || change.type === "human_edited")));
   $("save-archive").textContent = editedArchive ? "下载当前存档文本" : "下载存档文本";
-  if (!conversation) { empty(messages, "没有对话内容", "此对话包未包含可阅读的对话。"); return; }
+  if (!conversation) { $("turn-directory").replaceChildren(); $("turn-navigation").replaceChildren(); empty(messages, "没有对话内容", "此对话包未包含可阅读的对话。"); return; }
   const sourceLine = node("div", "conversation-source");
   sourceLine.append(node("span", "platform-badge", `声明来源：${platformLabel(conversationPlatform(conversation))}`));
   if (archive) sourceLine.append(node("span", "archive-badge", "原文存档"));
@@ -378,8 +458,10 @@ function renderConversation() {
   provenance.append(node("summary", "", "来源、上下文与编辑记录"), node("pre", "", JSON.stringify(provenanceRecord(conversation), null, 2)), action("复制来源记录", "text-button", () => perform(() => copyProvenance(conversation))));
   $("conversation-provenance").append(provenance);
   const editable = state.reader.kind === "local" || isDraft();
-  (conversation.messages || []).forEach((message, index) => {
+  const visibleMessages = renderTurnDirectory(conversation);
+  visibleMessages.forEach(({ message, index }) => {
     const section = node("section", `message ${message.role === "assistant" ? "assistant" : "user"}`);
+    section.dataset.messageId = message.id || "";
     const header = node("div", "message-heading");
     header.append(node("span", "message-avatar", message.role === "assistant" ? "AI" : message.role === "user" ? "U" : "·"), node("span", "message-label", roleLabel(message.role)));
     const transformations = message.transformations || [];
@@ -406,10 +488,13 @@ function renderConversation() {
       }
       header.append(controls);
     }
+    const recordedTime = messageDate(message);
+    if (recordedTime) header.append(node("time", "message-time", `${transformations.includes("codex-turn-start-timestamp") ? "轮次开始 · " : ""}${recordedTime.toLocaleString("zh-CN")}`));
     section.append(header, content);
+    if (typeof renderMessageCode === "function") renderMessageCode(section, conversation, message);
     if (transformations.length) {
       const history = node("details", "provenance");
-      history.append(node("summary", "", "查看本条消息的变更记录"), node("pre", "", JSON.stringify(transformations, null, 2)));
+      history.append(node("summary", "", "导入与处理记录"), node("pre", "", JSON.stringify(transformations, null, 2)));
       section.append(history);
     }
     messages.append(section);
@@ -467,7 +552,7 @@ function markdown(conversation) {
   const parts = [`# ${conversation.title || "未命名对话"}`, "", `来源 ID: ${conversation.id || "未知"}`, "", "## 来源记录", "", "```json", JSON.stringify(provenanceRecord(conversation), null, 2), "```", ""];
   for (const message of conversation.messages || []) {
     parts.push(`## ${roleLabel(message.role)}`, "", message.content || "", "");
-    if ((message.transformations || []).length) parts.push(`变更记录: ${JSON.stringify(message.transformations)}`, "");
+    if ((message.transformations || []).length) parts.push(`处理记录: ${JSON.stringify(message.transformations)}`, "");
   }
   return parts.join("\n");
 }
@@ -688,6 +773,9 @@ function renderInspection(container, data) {
   const library = data.library || {};
   const summary = node("div", "inspect-summary");
   summary.append(node("h3", "", library.title || data.title || "对话包内容"), node("p", "", `${conversations.length} 段对话 · ${conversations.reduce((count, conversation) => count + (conversation.messages || []).length, 0)} 条消息`));
+  const code = data.code;
+  const codeHead = code && (code.snapshots || []).find((snapshot) => snapshot.id === code.head);
+  if (codeHead) summary.append(node("p", "", `${codeHead.files.length} 个代码文件 · ${code.snapshots.length} 个代码快照 · ${(code.bindings || []).length} 条消息关联`));
   if (library.description || data.description) summary.append(node("p", "", library.description || data.description));
   if (data.platforms) summary.append(platformBadges(data.platforms));
   if (data.import_report) summary.append(node("p", "field-help", data.import_report.mode === "archive" ? "原文存档：保留 UTF-8 文本，不恢复原平台会话。" : "统一正文：仅转换支持的内容，不保证可导回原平台。"));
@@ -913,6 +1001,10 @@ function renderReceipt(data) {
   container.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function bindEvents() {
+  $("turn-search").addEventListener("input", () => {
+    if (!requireSavedEditor()) return;
+    state.turnPage = 0; renderConversation();
+  });
   bindVersionEvents();
   bindContributionEvents();
   document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => $(button.dataset.close).close()));

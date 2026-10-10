@@ -48,7 +48,7 @@ def main():
             expect(panel.locator('.checkpoint-commit')).to_have_attribute('href', 'https://github.com/example/vibe-project/commit/' + 'a' * 40)
             expect(panel).to_contain_text('不代表 GitHub 认证')
             expect(page.locator('#checkpoint-restore-command')).to_contain_text('version=' + first)
-            page.locator('[data-repository-section="code-checkpoint-panel"]').click()
+            page.locator('[data-repository-section="code-browser-panel"]').click()
             assert page.url == first_url, 'Repository section navigation dropped the pinned version'
             page.locator('[data-repository-section="conversation-section"]').click()
             page.evaluate('window.scrollTo(0, 0)')

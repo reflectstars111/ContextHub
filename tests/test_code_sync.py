@@ -1,4 +1,5 @@
 """Real Git pairing, exact-object recovery and native retry boundaries."""
+from contextlib import chdir
 import json
 import os
 from pathlib import Path
@@ -97,6 +98,15 @@ class CodeSyncTests(unittest.TestCase):
         value = json.loads(conversation.read_text()); value['title'] = 'edited'
         conversation.write_text(json.dumps(value))
         with self.assertRaises(WorkspaceError): self.capture()
+        self.assertEqual(self.ws.head, original)
+
+    def test_capture_from_subdirectory_rejects_untracked_root_file(self):
+        nested = self.repo / 'nested'
+        nested.mkdir()
+        (self.repo / 'untracked-root.txt').write_text('must not be omitted')
+        original = self.ws.head
+        with chdir(nested), self.assertRaises(CodeSyncError):
+            self.capture()
         self.assertEqual(self.ws.head, original)
 
     def test_stale_missing_commit_and_existing_destination_fail_before_publish(self):

@@ -88,4 +88,4 @@ def attach_checkpoint(blob, git_info):
     checkpoint = validate_checkpoint(checkpoint)
     library = package["library"]
     return build_package(package["conversations"], library["title"], library["description"],
-                         source=library["source"], code_checkpoint=checkpoint)
+                         source=library["source"], code_checkpoint=checkpoint, code=package.get('code'))

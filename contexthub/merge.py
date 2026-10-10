@@ -221,7 +221,7 @@ def _retain_deleted_audit(base, merged):
 
 def _validate(package):
     """Check canonical payload structure; the caller verifies original ZIP hashes."""
-    if not isinstance(package, dict) or set(package) != {"manifest", "library", "conversations", "compatibility"}:
+    if not isinstance(package, dict) or set(package) - {'code'} != {"manifest", "library", "conversations", "compatibility"}:
         raise PackageError("Merge inputs must be validated read_package results")
     conversations = _normalize_conversations(package["conversations"])
     if conversations != package["conversations"]:
@@ -249,6 +249,9 @@ def _validate(package):
         raise PackageError("Merge manifest does not describe the canonical conversations")
     if package["compatibility"] != _compatibility(conversations, library["source"]):
         raise PackageError("Merge compatibility report is not canonical")
+    if 'code' in package:
+        from .code_repository import validate_code
+        validate_code(package['code'], conversations)
 
 
 def merge_packages(base, target, source):
@@ -282,11 +285,13 @@ def merge_packages(base, target, source):
     library["code_checkpoint"] = copy.deepcopy(theirs if ours == old else ours)
     conversations = _entities(base["conversations"], target["conversations"], source["conversations"],
                               "/conversations", conflicts, "conversation")
+    from .code_repository import merge_code, prune_bindings
+    code = merge_code(base.get('code'), target.get('code'), source.get('code'), conflicts)
     if conflicts.count:
         return conflicts.result()
     _retain_deleted_audit(base["conversations"], conversations)
     try:
-        package = build_package(conversations, **library)
+        package = build_package(conversations, **library, code=prune_bindings(code, conversations))
     except PackageError as exc:
         conflicts.add("/package", "validation", None, str(exc), None)
         return conflicts.result()

@@ -1,6 +1,6 @@
 """Codex app-server adapter. No model turn is started by transfer operations.
 
-Exports are a text projection of a stable prefix of completed turns. Imports
+Exports are a text projection of a stable prefix of terminal turns. Imports
 rebuild a native text timeline on explicitly supported Codex versions, or use
 the explicit context-only compatibility mode. Neither restores source machine
 state, permissions, instructions, or tool execution.
@@ -273,23 +273,56 @@ def _turns(client, thread_id, history_mode):
     return turns
 
 
-def _completed_prefix(turns):
+def _terminal_prefix(turns, before_turn=None):
     prefix = []
     seen = set()
     for turn in turns:
         identifier = turn.get("id")
-        if not isinstance(identifier, str) or identifier in seen:
+        if not isinstance(identifier, str) or not identifier or identifier in seen:
             raise CodexError("Thread contains missing or duplicate turn IDs")
         seen.add(identifier)
-        if turn.get("status") != "completed":
+    if before_turn is not None and before_turn not in seen:
+        raise CodexError("Requested before-turn boundary was not found in thread history")
+    for turn in turns:
+        identifier = turn["id"]
+        if identifier == before_turn or turn.get("status") not in {"completed", "interrupted", "failed"}:
             return prefix, identifier
         prefix.append(turn)
     return prefix, None
 
 
+def _timestamp(*values):
+    """Normalize a declared timestamp; missing/ambiguous values stay absent.
+
+    Current Codex turn.startedAt is Unix seconds. Millisecond epochs and
+    timezone-qualified ISO values are accepted for adapter compatibility.
+    The thread creation time and export clock are never message substitutes.
+    """
+    for value in values:
+        try:
+            if type(value) in (int, float):
+                if value < 0:
+                    continue
+                seconds = value / 1000 if value >= 100_000_000_000 else value
+                parsed = dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc)
+            elif isinstance(value, str) and len(value) <= 64 and 'T' in value:
+                parsed = dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    continue
+                parsed = parsed.astimezone(dt.timezone.utc)
+            else:
+                continue
+            return parsed.isoformat().replace('+00:00', 'Z')
+        except (OverflowError, OSError, ValueError):
+            continue
+    return None
+
+
 def _project_messages(turns, thread_id):
     messages, warnings = [], []
     for turn in turns:
+        turn_time = _timestamp(*(turn.get(key) for key in
+                                 ('startedAt', 'started_at', 'createdAt', 'created_at', 'timestamp')))
         for index, item in enumerate(turn.get("items", [])):
             kind = item.get("type", "unknown")
             if kind == "userMessage":
@@ -312,33 +345,48 @@ def _project_messages(turns, thread_id):
                 warnings.append(f"Omitted empty {role} message in turn {turn['id']}")
                 continue
             item_id = item.get("id") or f"{turn['id']}-{index}"
+            item_time = _timestamp(*(item.get(key) for key in ('createdAt', 'created_at', 'timestamp')))
+            provenance = {"provider": "codex", "thread_id": thread_id,
+                          "turn_id": turn["id"], "item_id": item_id}
+            transformations = ["codex-user-assistant-projection"]
+            if item_time or turn_time:
+                provenance['created_at'] = item_time or turn_time
+                if not item_time:
+                    transformations.append('codex-turn-start-timestamp')
+                    warnings.append('Some message timestamps record the turn start time, not the individual message time')
             messages.append({
                 "id": f"{turn['id']}:{item_id}", "role": role, "content": text,
-                "provenance": {"provider": "codex", "thread_id": thread_id,
-                               "turn_id": turn["id"], "item_id": item_id},
-                "transformations": ["codex-user-assistant-projection"],
+                "provenance": provenance,
+                "transformations": transformations,
             })
             if len(messages) > MAX_MESSAGES:
                 raise CodexError("Conversation exceeds 2000 messages; choose a smaller completed range")
     return messages, list(dict.fromkeys(warnings))
 
 
-def export_conversation(client, thread_id):
+def export_conversation(client, thread_id, *, before_turn=None):
     if not isinstance(thread_id, str) or not thread_id:
         raise ValueError("thread_id is required")
+    if before_turn is not None and (not isinstance(before_turn, str) or not before_turn):
+        raise ValueError("before_turn must be a nonempty turn ID")
     thread = client.request("thread/read", {"threadId": thread_id, "includeTurns": False}).get("thread", {})
     history_mode = thread.get("historyMode") or "legacy"
-    captured, boundary = _completed_prefix(_turns(client, thread_id, history_mode))
-    # Re-read the chosen completed prefix; later completed turns may be appended.
-    current, _ = _completed_prefix(_turns(client, thread_id, history_mode))
+    captured, boundary = _terminal_prefix(_turns(client, thread_id, history_mode), before_turn)
+    # Compare complete turn objects, including status and items. Later terminal
+    # turns may be appended without changing the selected snapshot.
+    current, _ = _terminal_prefix(_turns(client, thread_id, history_mode), before_turn)
     if current[:len(captured)] != captured:
         raise CodexError("Thread history changed during export; retry for a stable snapshot")
     messages, warnings = _project_messages(captured, thread_id)
-    warnings.append("Export contains visible completed user/assistant timeline messages only; injected context and hidden system/developer/tool state are not included")
+    warnings.append("Export contains visible user/assistant timeline text from terminal turns only; injected context and hidden system/developer/tool state are not included")
+    unsuccessful = [turn for turn in captured if turn["status"] != "completed"]
+    for turn in unsuccessful:
+        warnings.append(f"Turn {turn['id']} ended as {turn['status']}; its visible text may be partial")
     if boundary:
-        warnings.append(f"Stopped before unfinished or unsuccessful turn {boundary}; later turns excluded")
+        reason = "requested boundary" if boundary == before_turn else "unfinished or unknown-status turn"
+        warnings.append(f"Stopped before {reason} {boundary}; this turn and later turns excluded")
     if not messages:
-        warnings.append("No completed user/assistant messages are exposed by Codex; injected context may not appear in its timeline")
+        raise CodexError("No visible user/assistant messages in the selected terminal history; refusing an empty export. Injected context may not appear in the Codex timeline")
     result = {
         "schema_version": "0.1",
         "id": thread_id, "title": thread.get("name") or "Codex conversation",
@@ -346,7 +394,9 @@ def export_conversation(client, thread_id):
         "source": {"provider": "codex", "thread_id": thread_id,
                    "history_mode": history_mode,
                    "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                   "completed_turn_ids": [t["id"] for t in captured], "warnings": warnings},
+                   "completed_turn_ids": [t["id"] for t in captured if t["status"] == "completed"],
+                   "completeness": "partial-visible-text" if boundary or unsuccessful else "visible-text-only",
+                   "warnings": warnings},
     }
     if isinstance(thread.get("cliVersion"), str) and thread["cliVersion"]:
         result["source"]["cli_version"] = thread["cliVersion"]

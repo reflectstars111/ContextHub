@@ -365,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/config' and method == 'GET':
                 return self._send(200, {'mode': self.server.mode, 'version': __version__,
                                         'max_package_bytes': self.server.max_body_bytes,
-                                        'capabilities': ({'new_library_key': True, 'expected_visibility': True}
+                                        'capabilities': ({'new_library_key': True, 'expected_visibility': True, 'code_repository_v1': True}
                                                          if self.server.mode == 'hub' else {})})
             if path.startswith('/api/local/'):
                 return self._local(method, path, query)
@@ -408,6 +408,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, cli_archive(), 'application/octet-stream',
                               {'Content-Disposition': 'attachment; filename="ctx.pyz"'})
         allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/contributions.js': 'contributions.js', '/drafts.js': 'drafts.js', '/lifecycle.js': 'lifecycle.js', '/style.css': 'style.css', '/cli': 'cli.html', '/cli.css': 'cli.css'}
+        allowed['/code-browser.js'] = 'code-browser.js'
         allowed.update({'/repository.css': 'repository.css', '/repository.js': 'repository.js'})
         if path not in allowed:
             raise HTTPError(404, '未找到页面')
@@ -451,6 +452,7 @@ class Handler(BaseHTTPRequestHandler):
             self._session(required=True, mutate=True)
             _, package, report = self._import_upload(query)
             return self._send(200, {**{k: package[k] for k in ('library', 'conversations', 'compatibility')},
+                                    'code': package.get('code'),
                                     'platforms': report['platforms'], 'import_report': report})
         if path == '/api/packages':
             if method == 'GET':
@@ -476,13 +478,22 @@ class Handler(BaseHTTPRequestHandler):
                                            messages[0], creation_keys[0])
                 return self._send(201, {**result, 'import_report': report})
         parts = path.strip('/').split('/')
-        if len(parts) in (3, 4) and parts[:2] == ['api', 'packages']:
+        if len(parts) in (3, 4, 5) and parts[:2] == ['api', 'packages']:
             ident = parts[2]
             mutating = method in ('POST', 'DELETE')
             downloading = method == 'GET' and len(parts) == 4 and parts[3] == 'download'
             private_draft = len(parts) == 4 and parts[3] == 'draft'
             session = self._session(required=mutating or downloading or private_draft, mutate=mutating)
             user_id = (session['user'] or {}).get('id')
+            if len(parts) >= 4 and parts[3] == 'code' and method == 'GET':
+                if len(parts) == 5 and parts[4] not in ('file', 'diff'):
+                    raise HTTPError(404, '未找到此代码接口')
+                for key in ('version', 'snapshot', 'path'):
+                    if len(query.get(key, [None])) != 1:
+                        raise ValueError(f'{key} 参数不能重复')
+                return self._send(200, store.code_view(
+                    ident, user_id, query.get('version', [None])[0], query.get('snapshot', [None])[0],
+                    query.get('path', [None])[0], parts[4] if len(parts) == 5 else 'summary'))
             if len(parts) == 4 and parts[3] == 'download' and method == 'GET':
                 return self._send(200, store.download(ident, user_id, version_id=query.get('version', [None])[0]), 'application/zip', {'Content-Disposition': f'attachment; filename="{ident}.contextpack"'})
             if len(parts) == 3 and method == 'GET':
@@ -551,15 +562,16 @@ class Handler(BaseHTTPRequestHandler):
                         'title': candidate['library']['title'],
                         'description': candidate['library']['description'],
                         'code_checkpoint': candidate['library'].get('code_checkpoint'),
+                        'code': candidate.get('code'),
                         'conversations': candidate['conversations']})
                     checked = read_package(canonical)
-                    fields = ('library', 'conversations', 'compatibility')
+                    fields = ('library', 'conversations', 'compatibility', 'code')
                     # ZIP compression/entry order can vary across machines.
                     # Validate every semantic field, then retain the original
                     # validated bytes so client object hashes remain portable.
-                    if any(checked[field] != candidate[field] for field in fields):
+                    if any(checked.get(field) != candidate.get(field) for field in fields):
                         raise ValueError('本地快照的编辑记录与基准版本不一致，请使用最新 ctx 工具重新提交')
-                    if all(base[field] == candidate[field] for field in fields):
+                    if all(base.get(field) == candidate.get(field) for field in fields):
                         raise ValueError('内容没有变化，无需创建新版本')
                     return self._send(201, store.add_version(ident, session['user'], submitted, base_id, message,
                                                            expected_visibility=visibilities[0]))
@@ -649,7 +661,7 @@ class Handler(BaseHTTPRequestHandler):
         if method == 'POST' and path in ('/api/local/inspect', '/api/local/import'):
             package = read_package(self._body())
             if path.endswith('inspect'):
-                return self._send(200, {k: package[k] for k in ('library', 'conversations', 'compatibility')})
+                return self._send(200, {**{k: package[k] for k in ('library', 'conversations', 'compatibility')}, 'code': package.get('code')})
             if any(c['source'].get('kind') == 'source_archive' for c in package['conversations']):
                 raise ValueError('原文存档尚未解析为对话，不能作为会话恢复；请先将原文件转换为角色消息')
             cwd = query.get('cwd', [''])[0]
@@ -668,6 +680,8 @@ class Handler(BaseHTTPRequestHandler):
                                   'error': str(exc)[:500], 'mode': 'failed'}
                     except Exception as exc:
                         result = {'title': conversation['title'], 'verified': False, 'error': f'导入未完成：{type(exc).__name__}，请核查部分创建的会话'}
+                    if package.get('code'):
+                        result.setdefault('warnings', []).append('此入口仅导入对话，包内代码尚未恢复。请用 ctx restore HEAD --to 新目录 --codex 同步恢复代码与对话。')
                     results.append(result)
             return self._send(200, {'results': results})
         raise HTTPError(404, '未找到本地连接器接口')

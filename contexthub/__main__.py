@@ -29,12 +29,13 @@ def save(path, data, force=False):
 def inspect_package(package):
     from .checkpoints import checkpoint_status
     from .platforms import package_platforms
+    from .code_repository import code_summary
     return {'title': package['library'].get('title'), 'conversation_count': len(package['conversations']),
             'platforms': package_platforms(package),
             'conversations': [{'id': c['id'], 'title': c['title'], 'message_count': len(c['messages'])} for c in package['conversations']],
             'compatibility': package['compatibility'],
             'code_checkpoint': package['library'].get('code_checkpoint'),
-            'code_checkpoint_status': checkpoint_status(package)}
+            'code_checkpoint_status': checkpoint_status(package), 'code': code_summary(package.get('code'))}
 
 
 def http_url(value):
@@ -96,6 +97,7 @@ def parser():
     p.add_argument('--search', default='')
     p = sub.add_parser('export', help='按 ID 批量导出 Codex 对话')
     p.add_argument('--thread', action='append', required=True)
+    p.add_argument('--before-turn', help='仅单会话：在指定轮次前截断，不包含该轮次及后续内容')
     p.add_argument('--title', default='我的 Codex 对话库')
     p.add_argument('--description', default='')
     p.add_argument('-o', '--output', required=True)
@@ -246,17 +248,22 @@ def main(argv=None):
                     except Exception as exc:
                         result = {'title': conversation['title'], 'mode': 'failed', 'verified': False,
                                   'error': f'导入未完成：{type(exc).__name__}，请核查部分创建的会话'}
+                    if package.get('code'):
+                        result.setdefault('warnings', []).append('此命令仅导入对话；包内代码尚未恢复。使用 ctx add、ctx commit 后执行 ctx restore HEAD --to 新目录 --codex 同步恢复。')
                     results.append(result)
             emit({'results': results, 'note': '导入创建新的文本时间线或上下文，不自动调用模型；请查看逐条兼容报告。'})
             return 1 if any(r.get('error') or r.get('mode') == 'failed' or r.get('injected') is False for r in results) else 0
         else:
             from .codex import CodexClient, export_conversation, list_sessions
+            if args.action == 'export' and args.before_turn and len(set(args.thread)) != 1:
+                raise ValueError('--before-turn 只能用于单个 --thread 会话')
             with CodexClient() as client:
                 if args.action == 'list':
                     sessions = list_sessions(client, args.archived, args.subagents)
                     emit([s for s in sessions if args.search.casefold() in json.dumps(s, ensure_ascii=False).casefold()])
                 elif args.action == 'export':
-                    conversations = [export_conversation(client, ident) for ident in dict.fromkeys(args.thread)]
+                    conversations = [export_conversation(client, ident, before_turn=args.before_turn)
+                                     for ident in dict.fromkeys(args.thread)]
                     findings = []
                     if not args.no_redact:
                         conversations, findings = redact_conversations(conversations)

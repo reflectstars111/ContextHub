@@ -379,6 +379,7 @@ class HubClient:
                              authenticated=True, json_response=False)
 
     def upload(self, blob, visibility='private', message=None, new_library_key=None):
+        self._require_code_support(blob)
         if new_library_key is not None:
             # Older Hubs silently ignore unknown query parameters and dedupe by
             # content, which could bind a new branch to its original repository.
@@ -397,9 +398,27 @@ class HubClient:
                                     'new_library_key': new_library_key}, authenticated=True)
 
     def push(self, ident, blob, base_version, message, expected_visibility=None):
+        self._require_code_support(blob)
         return self._request('POST', self._package_path(ident, '/push'), body=blob,
                              query={'base_version': base_version, 'message': message,
                                     'expected_visibility': expected_visibility}, authenticated=True)
+
+    def _require_code_support(self, blob):
+        from .package import PackageError, read_package
+        try:
+            code = read_package(blob).get('code')
+        except PackageError:
+            return  # The upload endpoint retains responsibility for validation.
+        if code is None:
+            return
+        try:
+            config = self.config()
+        except HubClientError as exc:
+            if exc.status not in (404, 405):
+                raise
+            config = {}
+        if not isinstance(config, dict) or config.get('capabilities', {}).get('code_repository_v1') is not True:
+            raise HubClientError(None, 'Hub 尚未声明支持代码快照，请升级 Hub 后重试；代码与对话均未上传。')
 
     def fork(self, ident, version, visibility='private'):
         return self._request('POST', self._package_path(ident, '/fork'),

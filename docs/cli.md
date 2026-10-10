@@ -1,6 +1,6 @@
 # ctx：ContextHub 的终端工具
 
-适用 **Linux / 远程服务器 / VS Code 终端**，当前 0.8.0 提供 **Windows 10/11 原生预览版**，需要 Python 3.12+，无需 WSL。管理对话不需要模型服务或第三方 Python 库；本地 Codex 桥接另需安装 Codex CLI。Windows 11 本机已验证全部 `ctx` 命令、内核路径、DPAPI、锁与安装器，详见[重构验证记录](verification/2026-10-09-windows-cli-refactor.md)。0.8.0 新增功能的原生 Windows CI 尚待运行，因此保留预览标记。
+适用 **Linux / 远程服务器 / VS Code 终端**，当前 0.10.0 提供 **Windows 10/11 原生预览版**，需要 Python 3.12+，无需 WSL。管理对话不需要模型服务或第三方 Python 库；默认采集项目代码需要 Git；本地 Codex 桥接另需安装 Codex CLI。Windows 11 本机已验证此前版本的 `ctx` 命令、内核路径、DPAPI、锁与安装器，详见[重构验证记录](verification/2026-10-09-windows-cli-refactor.md)。0.10.0 新增功能的原生 Windows CI 尚待运行，因此保留预览标记。
 
 ## 安装
 
@@ -57,9 +57,9 @@ export PATH="$HOME/.local/bin:$PATH"
 ctx --version
 ```
 
-确认校验通过后再安装。可将 PATH 设置加入 `~/.bashrc`；升级时重复下载、校验和安装。`ctx.pyz` 是可查看源码的 ZIP，包含 MIT 许可证；也可以用 `python3 ctx.pyz --help` 运行。网站仅打包明确列出的产品源码，不包含服务器数据、凭据、用户对话或项目文件。
+确认校验通过后再安装。可将 PATH 设置加入 `~/.bashrc`；升级时重复下载、校验和安装。`ctx.pyz` 是可查看源码的 ZIP，包含 MIT 许可证；也可以用 `python3 ctx.pyz --help` 运行。网站提供的 ctx 工具只打包产品源码，不包含服务器数据、凭据或用户上传的内容。
 
-源码开发安装：在项目根目录运行 `python3 -m venv .venv`，然后 `.venv/bin/python -m pip install -e .`，使用 `.venv/bin/ctx`；无需安装时可用 `python3 -m contexthub.ctx`。项目尚未发布到 PyPI，不要从同名未知包安装。
+源码目录可直接运行 `./ctx`，无需安装；也可使用 `python3 -m contexthub.ctx`。需要安装入口时，在项目根目录运行 `python3 -m venv .venv`，然后 `.venv/bin/python -m pip install -e .`，使用 `.venv/bin/ctx`。项目尚未发布到 PyPI，不要从同名未知包安装。
 
 ## 登录与站点选择
 
@@ -81,13 +81,59 @@ Linux 会话存储在 `~/.config/contexthub/credentials.json`，配置目录权�
 
 凭据文件含登录会话，应按秘密管理，不进入工作区或上传包。HTTP 仅允许字面 loopback IP（例如 `http://127.0.0.1:8765`）；客户端拒绝重定向，避免将内容或凭据转发给其他站点。退出会清除本地令牌，并尝试撤销服务器会话。
 
-## 本地导入与提交
+## 直接跟踪 Codex 对话
+
+在开发目录中首次运行：
+
+```bash
+ctx init --title '项目开发对话'
+ctx add --codex                 # 当前会话 + 当前 Git 工作区代码
+ctx diff --staged
+ctx commit -m '保存开发进度'
+ctx push
+
+# 继续与 Codex 对话后
+ctx add .
+ctx diff --staged
+ctx commit -m '完成一个开发步骤'
+ctx push
+```
+
+`add --codex` 直接从本机 Codex 读取可见正文、辅助脱敏，并记住所选会话，不生成中间 `.contextpack`。首次选择顺序是 `--thread ID`、Codex 提供的当前会话、工作区目录完全匹配的唯一会话。找不到或有多个候选时会停止，并提示用 `ctx codex list` 和 `ctx add --codex --thread ID` 明确选择；不会自动挑选最近的其他项目。无参数的 `ctx add` 会刷新已有绑定，尚未绑定时识别当前会话。
+
+在当前 Codex 会话内部运行时，会自动排除正在执行采集的最后一轮，下次 add 再收录；也可用 `--before-turn ID` 明确截止位置，仅支持单段会话。采集保留已结束轮次的用户与助手正文，中断或失败轮次标明可能不完整，不导入工具执行、图片或隐藏指令。不会调用模型、修改原始会话或重放工具。
+
+后续 `ctx add .` 读取当前分支的全部已跟踪会话及当前代码文件，再一起暂存；任一读取失败都不会部分更新。相同内容不会因为导出时间变化生成空版本。`commit` 只保存暂存区；`status / commit / push` 不暗中采集新对话。
+
+如果在 JSON 中人工改写或删除了已跟踪对话，自动刷新会停止并保留编辑。用 `ctx add . --no-refresh` 可以离线暂存人工版本，同时仍采集代码；明确决定恢复原生采集内容时，再用 `ctx add . --replace`。`--replace` 会覆盖所选已跟踪对话的当前内容，先检查 `ctx diff`。已有人工版本和拉取合并的修改也受相同保护。
+
+跟踪绑定按本地分支保存在 `.contexthub`，不会进入上传包、普通 Git 导出或远端 clone。代码仓库内的这个目录含本机状态，不应通过代码 Git 提交；本项目的根目录忽略规则已排除 `.contexthub/`、`library.json`、`code.json` 和 `conversations/`。新状态需使用 0.10.0 或更新 CLI，升级后不要用旧 CLI 写入工作区。其他平台暂通过具体导出文件接入。
+
+## 默认保存代码与对话
+
+0.10.0 的 `ctx add` 默认保存当前 Git 工作区的普通代码文件：已跟踪文件使用当前工作树字节，包含未暂存和未提交的修改；未跟踪文件按 Git 忽略规则筛选。ctx 不执行 `git commit`，不修改 Git 暂存区。代码和对话一起进入 ctx 暂存区，`ctx diff --staged` 可检查文件增删和文本 diff，随后 `commit / push` 保存并上传同一个版本。
+
+```bash
+ctx add .                           # 代码 + 已跟踪对话
+ctx add . --code ../another-project  # 明确指定代码 Git 工作区
+ctx add . --no-code                  # 只更新对话，保留已保存的代码
+ctx add . --no-refresh --no-code     # 只暂存本地人工对话编辑
+```
+
+没有 Git 仓库时，只更新对话并给出提示，不会扫描其他目录。Git/ContextHub 本地状态目录和常见凭据、私钥文件会被排除，`ctx --json add .` 可查看排除清单；文件排除不保证发现所有秘密，提交和公开前请检查暂存内容。符号链接、硬链接、子模块、LFS 指针等不支持的文件会停止采集。代码快照是工作树的保存状态，记录中的 Git commit 只是来源信息，不表示文件与该提交完全一致。
+
+每次采集只将当前对话最新一轮绑定到保存时代码；没有轮次 ID 时，仅绑定最后一条消息。已有绑定保留，旧消息不会被批量指向当前代码，也不会推测过去的执行状态。新采集的 Codex 消息带真实轮次开始时间；网页按日期、轮次组织，默认只显示最新轮次，无时间则显示“时间未记录”，已有版本不会自动补填日期。
+
+已携带代码的 `.contextpack` 默认保留其中的代码与关联，必须逐包执行 `ctx add 文件.contextpack`。显式 `--no-code` 会保留当前工作区旧代码；显式 `--code 路径` 会改为采集指定 Git 工作区，以显式选项为准。只含对话的文件仍可批量导入，并按上述默认规则同时采集当前项目代码。
+
+## 本地文件导入与提交
 
 ```bash
 ctx init my-dialogues --title '我的对话库' --description '项目思考与问题整理'
 cd my-dialogues
 ctx inspect ../first.contextpack
-ctx add ../first.contextpack ../second.contextpack
+ctx add ../first.contextpack
+ctx add ../second.contextpack  # 含代码的包需逐个导入
 ctx add ../claude-export.json --platform claude
 ctx add ../deepseek.json --platform deepseek
 ctx diff --staged
@@ -96,9 +142,9 @@ ctx status
 ctx log
 ```
 
-支持的文件、识别规则和遗漏提示与[网站导入器](import-formats.md)一致。不能解析的 UTF-8 文本可显式 `ctx add notes.md --platform other --mode archive --confirm-import`。出现兼容提示时，先检查文件和命令输出，再决定是否加入 `--confirm-import`。添加文件会导入并暂存受支持内容；不会原样复制任意项目文件。源文件保持原位。
+支持的文件、识别规则和遗漏提示与[网站导入器](import-formats.md)一致。不能解析的 UTF-8 文本可显式 `ctx add notes.md --platform other --mode archive --confirm-import`。出现兼容提示时，先检查文件和命令输出，再决定是否加入 `--confirm-import`。文件参数用于导入受支持的对话格式；项目文件通过默认代码采集保存，不把任意文件参数解释成对话。源文件保持原位。
 
-批量 add 先解析全部文件，再执行一次工作区写入；某个文件不合格时不导入其余文件。add 暂存整个受管对话快照，包括已有对话尚未暂存的编辑，可先用 diff 检查。相同对话 ID 且内容不同会被拒绝，明确接受替换后使用 `--replace`。不会凭标题自动猜测两段对话是否相同。
+纯对话文件的批量 add 先解析全部文件，再执行一次工作区写入；某个文件不合格时不导入其余文件。add 暂存整个受管对话快照，包括已有对话尚未暂存的编辑，可先用 diff 检查。相同对话 ID 且内容不同会被拒绝，明确接受替换后使用 `--replace`。不会凭标题自动猜测两段对话是否相同。
 
 工作目录结构：
 
@@ -106,6 +152,7 @@ ctx log
 my-dialogues/
   library.json             # 库标题、说明、对话 ID 与顺序
   conversations/*.json     # 可编辑的规范化对话；文件名由稳定 ID 计算
+  code.json                # 可选：受管代码快照与文件内容，不建议手工修改
   .contexthub/              # 暂存状态、不可变提交、对象与远程绑定
 ```
 
@@ -118,9 +165,9 @@ ctx diff --staged
 ctx commit -m '补充背景与修正回答'
 ```
 
-`add .` 仅读取 `library.json` 和其中指定的对话，暂存全部受管 JSON 的改动；不会扫描代码目录。移除对话需要从 `library.json` 的 `conversation_ids` 列表移除相应 ID；至少保留一段对话。已有来源和审计记录保留，正文修改标记为人工编辑。`commit` 只提交暂存区，不自动暂存后续编辑。
+没有原生来源绑定时，`add .` 读取 `library.json` 和其中指定的对话；有绑定时会先刷新对应会话，`--no-refresh` 可跳过刷新。两种情况默认都会采集当前 Git 工作区代码；用 `--no-code` 保留已有代码。移除对话需要从 `library.json` 的 `conversation_ids` 列表移除相应 ID；至少保留一段对话。已有来源和审计记录保留，正文修改标记为人工编辑。`commit` 只提交暂存区，不自动暂存后续编辑。
 
-本地工作不需要网络。每次提交保存完整、可校验的对话快照；首版没有对象清理功能，磁盘随版本增长。不要手动改 `.contexthub/` 内部文件。
+本地工作不需要网络。每次提交保存完整、可校验的代码与对话快照；首版没有对象清理功能，磁盘随版本增长。不要手动改 `.contexthub/` 内部文件。
 
 ## 推送、克隆与拉取
 
@@ -141,7 +188,7 @@ ctx pull
 
 首次 push 按最旧到最新顺序发布所有本地提交，提交说明保留；每个成功响应后保存同步位置，失败不会丢弃未推送提交。每个本地分支使用持久的新建标识创建独立库，即使内容相同也不会绑定其他库；响应丢失后重试仍指向同一库。此功能需要支持该能力的 0.7.0 或更新 Hub，旧 Hub 会在上传前被拒绝，请同步升级服务端和 CLI。库公开性可在网页设置中修改；push 不更改可见性，并检查已绑定的可见性是否一致。若网页改变了公开性，push 会安全停止；检查当前可见性后显式 pull 更新绑定，再决定是否 push。发生过可见性变更的库会拒绝缺少此检查的旧客户端发布，请升级 ctx。
 
-上传、克隆、下载、Fork、发布与拉取均需登录；他人的私有库无法访问。复制网页分享链接不传递密码或令牌。推送前要求工作区干净，避免“以为未提交编辑也已上传”的误解。
+上传、克隆、下载、Fork、发布与拉取均需登录；他人的私有库无法访问。复制网页分享链接不传递密码或令牌。推送前要求 ctx 工作区干净；代码不必先做 Git 提交，但必须先由 `ctx add` 采集并 `ctx commit`。push 上传已保存版本，不重新扫描代码或 Codex。
 
 pull 要求工作区没有未提交编辑。有待推送提交时，会按共同基准尝试三方合并独立变化。服务端以基准版本进行并发检查；如果网页或另一台机器已发布新版，陈旧 push 会失败，不覆盖远端。网络失败后可重试 push，同基准、内容与说明不会重复创建版本。
 
@@ -160,9 +207,31 @@ ctx log
 
 分支共享不可变对象，各有独立 HEAD 和 Hub 绑定。新分支不继承原分支的远程库绑定，首次 push 会创建自己的库；切回原分支继续使用原绑定。切换要求没有未提交修改。旧版单分支工作区自动兼容迁移为 main。
 
-独立字段变化可合并；同字段不同修改、删除/编辑及不确定的顺序冲突要求人工解决。合并保存两个父提交，Hub 仍按线性公开版本接收当前分支快照，本地和 Git 导出保留完整分支 DAG。当前不提供 force、rebase、reset 或对象 GC。
+对话的独立字段变化可合并；同字段不同修改、删除/编辑及不确定的顺序冲突要求人工解决。代码独立文件的变化可三方合并；双方不同地修改同一文件会报告冲突，不进行智能代码文本拼接。合并保存两个父提交，Hub 仍按线性公开版本接收当前分支快照，本地和 Git 导出保留完整分支 DAG。当前不提供 force、rebase、reset 或对象 GC。
 
-## 关联代码与同步恢复
+## 代码与对话一起恢复
+
+内嵌代码需要 0.10.0 或更新的 ctx 与 Hub。push、clone、Fork、导出包和受管 Git 格式互通都会保留代码文件、代码快照及消息关联。clone 下载的是所选 ctx 版本；它携带该包已记录的代码快照，不自动克隆代码原仓库的 Git 历史。
+
+```bash
+ctx clone 'https://contexthub.reflectstars.dev/?package=PACKAGE_ID&version=VERSION_ID' my-dialogues
+cd my-dialogues
+ctx restore HEAD --to ../restored-project
+ctx restore HEAD --snapshot SNAPSHOT_ID --to ../restored-snapshot
+ctx restore HEAD --message MESSAGE_ID --conversation CONVERSATION_ID --to ../restored-message
+```
+
+无需 `--code` 或原 Git 仓库。目标必须不存在，生成 `code/` 源文件、`conversations/` 中保留完整原始包的 ctx 工作区，以及 `receipt.json`；原项目不变，`code/` 不伪造 `.git` 或历史提交。`--snapshot` 与 `--message` 二选一；消息必须已有明确代码关联，缺失时会拒绝恢复，不猜测历史。消息选择改变恢复的代码快照，完整对话包仍保留。
+
+显式添加 `--codex` 可在恢复后的 `code/` 中创建新会话，多对话时用 `--conversation ID` 选择。配合 `--message` 时，仅将截至该消息的正文导入 Codex；仅选代码快照不会推测对话截断点。timeline 默认只支持已验证的 Codex 0.153.4，其他版本可显式 `--mode context`，原有附件、工具状态和执行环境限制不变。
+
+`--resume` 只核验已有恢复结果，不覆盖文件；原生导入状态不确定时不会重复创建会话，请检查回执。代码关联表示采集时代码，不能证明消息生成时的原生执行状态。
+
+代码上限为 128 个快照、每快照 10,000 个文件、单文件 16 MiB、全部快照去重后的文件字节 64 MiB；代码、对话及其他包内容合计遵守 100 MiB 解压上限。服务端还可配置更小的请求体限制。0.10.0 代码采集与恢复尚未完成原生 Windows 验收，Windows 仍为预览。
+
+## 旧式 Git 提交检查点
+
+旧包只保存 Git 提交关联而未携带代码文件时，继续使用以下流程。它与上面的内嵌工作树快照恢复分开：
 
 代码关联要求 ctx 和 Hub 均为 0.8.0 或更新版本；旧版 Hub 会拒绝含关联字段的包。在对话工作区内，将已保存的对话与代码提交建立检查点。代码仓库由 Git 管理，ctx 不自动提交你的代码。先处理代码和对话的未提交修改，再运行：
 
@@ -209,7 +278,7 @@ cd ../restored-dialogues
 ctx branch
 ```
 
-需要本机安装 Git。导出包含规范 JSON、快照和格式标记，保留本地分支及父子关系；不包含 Hub 凭据、绑定或项目杂项。Git 中直接编辑受管 JSON 并 commit 后，再导入会生成带审计记录的 ctx 版本；仅改 README 或空 Git 提交也可导入，push 跳过无内容变化的快照。
+需要本机安装 Git。导出包含规范 JSON、完整包快照和格式标记，保留本地分支、父子关系及包内代码文件；不包含 Hub 凭据、本机来源绑定或未采集的项目文件。Git 中直接编辑受管 JSON 并 commit 后，再导入会生成带审计记录的 ctx 版本；仅改 README 或空 Git 提交也可导入，push 跳过无内容变化的快照。
 
 导入只读取已提交的本地分支，不读取未提交工作树、执行 hooks、filters 或源仓库配置。它接收 ctx 导出格式，不盲目解释任意代码仓库。当前支持 SHA-1 Git 仓库、每个提交最多两个父节点、10,000 个提交和 512 MiB 快照总量；detached HEAD 先用 Git 创建或切换分支。导入目标必须不存在。原样往返保留 ctx 快照与 ID，普通 Git 编辑后再导出的 Git OID 可能变化。Hub 不直接提供 Git wire protocol HTTPS 服务。
 
@@ -261,4 +330,4 @@ Windows 会识别 PATH 中的 `codex.exe` 及常见 npm 安装目录中的原生
 
 `ctx --json status` 等命令输出 JSON，成功退出 0、失败退出 1、键盘中断退出 130。错误写 stderr；认证输出不含 cookie、密码和 CSRF 令牌。`ctx codex` 保留旧桥接命令自己的 JSON 回执。
 
-格式上限沿用 contextpack：200 段对话、每段 2,000 条消息、每段 JSON 5 MiB、总解压内容 100 MiB；公网当前单次请求最多 16 MiB，过大时分库管理。工作区写入使用文件锁、原子状态切换和恢复日志；不覆盖未跟踪文件，拒绝受管路径中的符号链接或硬链接。中断恢复时若发现外部编辑冲突，会停止并保留恢复材料。
+格式上限沿用 contextpack：200 段对话、每段 2,000 条消息、每段 JSON 5 MiB、总解压内容 100 MiB；代码另受上述快照及文件字节限额约束。服务端请求上限以 `/api/config` 和上传提示为准，过大时分库管理。工作区写入使用文件锁、原子状态切换和恢复日志；不覆盖未跟踪文件，拒绝受管路径中的符号链接或硬链接。中断恢复时若发现外部编辑冲突，会停止并保留恢复材料。

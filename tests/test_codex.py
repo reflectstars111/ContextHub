@@ -78,6 +78,113 @@ class CodexTests(unittest.TestCase):
         self.assertIn("t2", " ".join(result["source"]["warnings"]))
         self.assertNotIn("echo private", json.dumps(result))
 
+    def test_export_preserves_real_turn_times_in_seconds_milliseconds_and_iso(self):
+        values = [1791394887, 1791394887000, '2026-10-07T17:41:27Z',
+                  '2026-10-08T01:41:27+08:00']
+        for value in values:
+            with self.subTest(value=value):
+                source = dict(turn('t1', [USER, ASSISTANT]), startedAt=value)
+                result = self.codex.export_conversation(self.export_client([source]), 'source')
+                for message in result['messages']:
+                    self.assertEqual(message['provenance']['created_at'], '2026-10-07T17:41:27Z')
+                    self.assertIn('codex-turn-start-timestamp', message['transformations'])
+                self.assertIn('turn start', ' '.join(result['source']['warnings']))
+                from contexthub.package import build_package, read_package
+                decoded = read_package(build_package([result], 'Timestamp test'))
+                self.assertEqual(decoded['conversations'][0]['messages'][0]['provenance']['created_at'],
+                                 '2026-10-07T17:41:27Z')
+
+    def test_export_prefers_individual_message_time_and_preserves_fractional_seconds(self):
+        user = dict(USER, createdAt=1791394887.125)
+        assistant = dict(ASSISTANT, timestamp='2026-10-08T01:41:30.250Z')
+        source = dict(turn('t1', [user, assistant]), startedAt=1791394880)
+        result = self.codex.export_conversation(self.export_client([source]), 'source')
+        self.assertEqual([message['provenance']['created_at'] for message in result['messages']],
+                         ['2026-10-07T17:41:27.125000Z', '2026-10-08T01:41:30.250000Z'])
+        self.assertTrue(all('codex-turn-start-timestamp' not in message['transformations']
+                            for message in result['messages']))
+
+    def test_export_never_invents_missing_invalid_or_timezone_ambiguous_times(self):
+        for value in (None, '', 'yesterday', '2026-10-08T01:41:27', -1, True,
+                      float('nan'), float('inf'), 10**30, [], {}):
+            with self.subTest(value=value):
+                source = dict(turn('t1', [USER]), startedAt=value)
+                result = self.codex.export_conversation(self.export_client([source]), 'source')
+                self.assertNotIn('created_at', result['messages'][0]['provenance'])
+        result = self.codex.export_conversation(self.export_client([turn('t1', [USER])]), 'source')
+        self.assertNotIn('created_at', result['messages'][0]['provenance'])
+
+    def test_export_retains_terminal_interrupted_and_failed_turns_before_later_completion(self):
+        turns = [turn("t1", [USER], "interrupted"), turn("t2", [ASSISTANT], "failed"),
+                 turn("t3", [USER, ASSISTANT]), turn("active", [USER], "inProgress")]
+        result = self.codex.export_conversation(self.export_client(turns), "source")
+        self.assertEqual([m["provenance"]["turn_id"] for m in result["messages"]],
+                         ["t1", "t2", "t3", "t3"])
+        self.assertEqual(result["source"]["completed_turn_ids"], ["t3"])
+        warnings = " ".join(result["source"]["warnings"])
+        for value in ("t1", "interrupted", "t2", "failed", "partial", "active"):
+            self.assertIn(value, warnings)
+        from contexthub.package import build_package, read_package
+        decoded = read_package(build_package([result], "Interrupted history"))
+        self.assertEqual(len(decoded["conversations"][0]["messages"]), 4)
+        self.assertIn("partial", " ".join(decoded["conversations"][0]["source"]["warnings"]))
+
+    def test_export_before_turn_excludes_terminal_looking_active_turn_and_later_history(self):
+        turns = [turn("old", [USER]), turn("active", [ASSISTANT], "interrupted"),
+                 turn("later", [USER])]
+        result = self.codex.export_conversation(self.export_client(turns), "source", before_turn="active")
+        self.assertEqual([m["provenance"]["turn_id"] for m in result["messages"]], ["old"])
+        self.assertIn("active", " ".join(result["source"]["warnings"]))
+
+    def test_export_before_turn_must_exist_in_source_history(self):
+        with self.assertRaisesRegex(self.codex.CodexError, "before|boundary|found"):
+            self.codex.export_conversation(self.export_client([turn("t1", [USER])]),
+                                           "source", before_turn="missing")
+
+    def test_export_before_turn_must_still_exist_on_second_read(self):
+        count = 0
+        def handle(method, params):
+            nonlocal count
+            if method == "thread/turns/list":
+                count += 1
+                return page([turn("t1", [USER])] +
+                            ([turn("active", [ASSISTANT], "interrupted")] if count == 1 else []))
+        with self.assertRaisesRegex(self.codex.CodexError, "before|boundary|found|changed"):
+            self.codex.export_conversation(self.export_client([], handle), "source", before_turn="active")
+
+    def test_changed_interrupted_snapshot_fails_even_when_text_is_unchanged(self):
+        count = 0
+        def handle(method, params):
+            nonlocal count
+            if method == "thread/turns/list":
+                count += 1
+                return page([turn("t1", [USER], "interrupted" if count == 1 else "completed")])
+        with self.assertRaisesRegex(self.codex.CodexError, "changed|stable"):
+            self.codex.export_conversation(self.export_client([], handle), "source")
+
+    def test_export_allows_new_terminal_turns_after_the_captured_prefix(self):
+        count = 0
+        def handle(method, params):
+            nonlocal count
+            if method == "thread/turns/list":
+                count += 1
+                return page([turn("t1", [USER], "interrupted")] +
+                            ([turn("t2", [ASSISTANT])] if count > 1 else []))
+        result = self.codex.export_conversation(self.export_client([], handle), "source")
+        self.assertEqual([m["provenance"]["turn_id"] for m in result["messages"]], ["t1"])
+
+    def test_export_stops_at_unknown_status_instead_of_skipping_it(self):
+        result = self.codex.export_conversation(self.export_client([
+            turn("t1", [USER]), turn("unknown", [ASSISTANT], "futureStatus"), turn("later", [USER])
+        ]), "source")
+        self.assertEqual([m["provenance"]["turn_id"] for m in result["messages"]], ["t1"])
+
+    def test_export_rejects_empty_visible_history_instead_of_building_empty_package(self):
+        for turns in ([], [turn("active", [USER], "inProgress")],
+                      [turn("tools-only", [{"type": "commandExecution", "id": "tool"}])]):
+            with self.subTest(turns=turns), self.assertRaisesRegex(self.codex.CodexError, "No .*messages|empty"):
+                self.codex.export_conversation(self.export_client(turns), "source")
+
     def test_summary_turns_are_hydrated_from_all_item_pages(self):
         def handle(method, p):
             if method == "thread/items/list":

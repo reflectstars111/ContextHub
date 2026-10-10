@@ -6,12 +6,14 @@ executed. Restores publish a new, independent shallow repository atomically.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 from urllib.parse import urlsplit, urlunsplit
 
@@ -19,7 +21,7 @@ from . import safe_fs as fs
 from .checkpoints import checkpoint_status
 from .git_bridge import _Git, _destination, _read_file, GitBridgeError
 from .package import _json_bytes, read_package
-from .workspace import Workspace, WorkspaceError, _atomic, _directory
+from .workspace import Workspace, WorkspaceError, _atomic, _directory, _read
 
 _OID = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 _MAX_FILES = 50000
@@ -225,7 +227,7 @@ def _clean(git, root, gitdir, commit, files):
         if current != data or (os.name != 'nt' and bool(target.stat().st_mode & 0o111) != (mode == '100755')):
             raise CodeSyncError('代码工作区与提交内容不同；请先使用 Git 提交。自动换行或过滤器转换的检出暂不支持，请使用与 Git 对象字节一致的独立检出')
     git.environment['GIT_WORK_TREE'] = str(root)
-    if git.run('ls-files', '--others', '--exclude-standard', '-z', '--', limit=2 * 1024 * 1024):
+    if git.run('-C', str(root), 'ls-files', '--others', '--exclude-standard', '-z', '--', limit=2 * 1024 * 1024):
         raise CodeSyncError('代码工作区有未跟踪文件；请先提交或通过 .gitignore 排除')
 
 
@@ -397,6 +399,178 @@ def restore_pair(workspace, ref, repository, destination, *, codex=False, conver
             from .codex import CodexClient, import_conversation
             with CodexClient() as client:
                 result = import_conversation(client, selected, destination / 'code', mode=mode)
+            receipt['native_receipt'] = result
+            success = bool(result.get('verified')) if mode == 'timeline' else bool(result.get('injected'))
+            if not success or result.get('mode') == 'failed':
+                raise CodeSyncError('Codex 未确认所请求的导入成功')
+            receipt['native_status'] = 'complete'
+            _write_receipt(destination, receipt)
+        except Exception as exc:
+            receipt['native_status'] = 'uncertain'
+            receipt['native_error'] = type(exc).__name__
+            _write_receipt(destination, receipt)
+            raise NativeRestoreError('代码与对话已恢复；Codex 导入未完成或状态不确定。请检查目标 receipt.json，不会自动重复导入', receipt) from exc
+    return dict(receipt, directory=str(destination), resumed=False)
+
+
+def _verify_embedded_code(directory, snapshot):
+    """Inspect exactly the restored tree through anchored, non-link handles."""
+    expected = {}
+    for item in snapshot['files']:
+        parts = item['path'].split('/')
+        parent = expected
+        for part in parts[:-1]:
+            parent = parent.setdefault(part, {})
+        parent[parts[-1]] = ('file', item)
+
+    def check(anchor, nodes):
+        # POSIX lists the directory descriptor; Windows ancestors remain held
+        # open without delete sharing while their guarded path is enumerated.
+        if set(os.listdir(getattr(anchor, 'path', anchor))) != set(nodes):
+            raise CodeSyncError('已恢复的代码目录包含新增、移除或重命名的文件，不能复用')
+        for name, node in nodes.items():
+            information = fs.stat_entry(anchor, name)
+            if isinstance(node, dict):
+                if not stat.S_ISDIR(information.st_mode):
+                    raise CodeSyncError('已恢复的代码目录类型发生变化，不能复用')
+                child = fs.child_dir(anchor, name)
+                try:
+                    check(child, node)
+                finally:
+                    fs.close(child)
+            else:
+                item = node[1]
+                data = _read(anchor, name, item['size'])
+                if (len(data) != item['size'] or hashlib.sha256(data).hexdigest() != item['sha256']
+                        or (os.name != 'nt' and bool(information.st_mode & 0o111) != (item['mode'] == '100755'))):
+                    raise CodeSyncError('已恢复的代码内容或执行权限发生变化，不能复用')
+        if set(os.listdir(getattr(anchor, 'path', anchor))) != set(nodes):
+            raise CodeSyncError('核验期间代码目录发生变化，请重新检查')
+
+    anchor = _directory(directory)
+    try:
+        check(anchor, expected)
+    finally:
+        fs.close(anchor)
+
+
+def _verify_embedded_pair(destination, expected, snapshot):
+    _safe_directory(destination)
+    try:
+        receipt = json.loads(_read_file(destination / 'receipt.json', 1024 * 1024))
+    except (ValueError, RecursionError) as exc:
+        raise CodeSyncError('恢复目录回执不是有效 JSON') from exc
+    if not isinstance(receipt, dict) or type(receipt.get('schema_version')) is not int:
+        raise CodeSyncError('恢复目录回执格式无效')
+    for key in ('schema_version', 'restore_kind', 'conversation_commit', 'snapshot_sha256',
+                'code_snapshot', 'selection', 'message_id', 'conversation_id',
+                'association_semantics', 'native_requested', 'native_scope', 'mode'):
+        if receipt.get(key) != expected[key]:
+            raise CodeSyncError('恢复目录回执与本次请求不同，不能继续')
+    if receipt.get('pair_status') != 'complete':
+        raise CodeSyncError('恢复目录未完成；请保留现场并使用新的目标目录')
+    restored = Workspace(destination / 'conversations')
+    with restored.locked():
+        restored._clean_snapshot()
+        if hashlib.sha256(restored.package_bytes()).hexdigest() != expected['snapshot_sha256']:
+            raise CodeSyncError('已恢复的对话包已改变，不能复用该目录')
+    _verify_embedded_code(destination / 'code', snapshot)
+    return receipt
+
+
+def restore_embedded(workspace, ref, destination, *, snapshot=None, message=None,
+                     conversation=None, codex=False, mode='timeline', resume=False):
+    """Restore a self-contained code/conversation pair into a new directory.
+
+Code selection follows a saved snapshot or a message's explicit capture-time
+association. The complete original package is always retained in conversations.
+Only native Codex import is truncated through a selected message; selecting a
+snapshot alone does not invent a matching historic conversation prefix.
+"""
+    if mode not in ('timeline', 'context'):
+        raise CodeSyncError('不支持的 Codex 恢复模式')
+    if snapshot is not None and message is not None:
+        raise CodeSyncError('--snapshot 与 --message 只能选择一个代码恢复依据')
+    with workspace.locked():
+        commit = workspace._resolve(ref)
+        blob = workspace.package_bytes(commit)
+    package = read_package(blob)
+    code = package.get('code')
+    if code is None:
+        raise CodeSyncError('所选版本没有携带代码；请先 ctx add . 保存代码和对话，旧 Git 关联可使用 --code')
+    choices = package['conversations']
+    selected = None
+    if conversation is not None:
+        selected = next((item for item in choices if item['id'] == conversation), None)
+        if selected is None:
+            raise CodeSyncError('找不到指定的对话 ID')
+    selection = 'snapshot' if snapshot is not None else 'head'
+    if message is not None:
+        matches = [item for item in code['bindings'] if item['message_id'] == message
+                   and (conversation is None or item['conversation_id'] == conversation)]
+        if not matches:
+            raise CodeSyncError('这条消息没有已记录的代码关联；无法推断历史代码，请选择已保存快照')
+        if len(matches) > 1:
+            raise CodeSyncError('多个对话含有相同消息 ID，请用 --conversation 明确选择')
+        binding = matches[0]
+        snapshot = binding['snapshot_id']
+        selected = next(item for item in choices if item['id'] == binding['conversation_id'])
+        selection = 'message'
+    ident = code['head'] if snapshot is None else snapshot
+    code_snapshot = next((item for item in code['snapshots'] if item['id'] == ident), None)
+    if code_snapshot is None:
+        raise CodeSyncError('找不到指定的代码快照')
+    native = None
+    if codex:
+        if selected is None and len(choices) == 1:
+            selected = choices[0]
+        if selected is None:
+            raise CodeSyncError('请用 --conversation 指定要导入 Codex 的对话 ID')
+        if selected.get('source', {}).get('kind') == 'source_archive':
+            raise CodeSyncError('原文存档尚未解析为对话，不能恢复为 Codex 会话；请先转换为角色消息')
+        native = copy.deepcopy(selected)
+        if message is not None:
+            cutoff = next(index for index, item in enumerate(native['messages']) if item['id'] == message)
+            native['messages'] = native['messages'][:cutoff + 1]
+            native['source'].setdefault('warnings', []).append(
+                '本次原生导入截断至所选消息；代码来自其保存时关联快照，不代表当时的原生执行状态。完整对话包另行保留。')
+    destination = Path(os.path.abspath(os.fspath(destination)))
+    receipt = {
+        'schema_version': 1, 'restore_kind': 'embedded', 'conversation_commit': commit,
+        'snapshot_sha256': hashlib.sha256(blob).hexdigest(), 'code_snapshot': ident,
+        'selection': selection, 'message_id': message,
+        'conversation_id': selected['id'] if selected else None,
+        'association_semantics': 'save_time_snapshot', 'pair_status': 'preparing',
+        'native_requested': codex, 'native_scope': ('through_message' if message is not None else 'full_conversation') if codex else None,
+        'mode': mode if codex else None, 'native_status': 'pending' if codex else 'not_requested',
+        'warnings': ['代码关联表示保存时采集的文件，不证明消息生成时的原生执行状态；完整原始对话包保留在 conversations。'],
+    }
+    if os.path.lexists(destination):
+        if not resume:
+            raise CodeSyncError('恢复目标必须不存在；核验已完成的恢复时添加 --resume')
+        receipt = _verify_embedded_pair(destination, receipt, code_snapshot)
+        if codex and receipt.get('native_status') != 'complete':
+            raise NativeRestoreError('对话与代码已恢复，但原生导入状态未完成或不确定；为避免重复会话，不自动重试，请检查 receipt.json', receipt)
+        return dict(receipt, directory=str(destination), resumed=True)
+    if resume:
+        raise CodeSyncError('--resume 仅用于核验已有完整恢复目录')
+    from .code_capture import restore_code
+    with _destination(destination) as (staged, _):
+        _write_receipt(staged, receipt)
+        restore_code(code, staged / 'code', snapshot=ident)
+        _workspace(staged / 'conversations', blob)
+        _verify_embedded_code(staged / 'code', code_snapshot)
+        receipt['pair_status'] = 'complete'
+        _write_receipt(staged, receipt)
+    if codex:
+        # Persist the retry boundary before creating native session state.
+        # A failed or interrupted import never causes a second import on resume.
+        receipt['native_status'] = 'in_progress'
+        _write_receipt(destination, receipt)
+        try:
+            from .codex import CodexClient, import_conversation
+            with CodexClient() as client:
+                result = import_conversation(client, native, destination / 'code', mode=mode)
             receipt['native_receipt'] = result
             success = bool(result.get('verified')) if mode == 'timeline' else bool(result.get('injected'))
             if not success or result.get('mode') == 'failed':
