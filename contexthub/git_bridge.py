@@ -312,7 +312,7 @@ def _snapshot(git, oid):
     if not isinstance(marker, dict) or set(marker) != {'format', 'version', 'commit'} or marker['format'] != _FORMAT or type(marker['version']) is not int or marker['version'] != 1:
         raise GitBridgeError('不支持的 ContextHub Git 格式')
     library = _load_json(git.blob(files['library.json'], MAX_METADATA_BYTES), 'library.json')
-    if not isinstance(library, dict) or set(library) != {'schema_version', 'title', 'description', 'source', 'conversation_ids'}:
+    if not isinstance(library, dict) or set(library) - {'code_checkpoint'} != {'schema_version', 'title', 'description', 'source', 'conversation_ids'}:
         raise GitBridgeError('Git library.json 格式无效')
     identifiers = library['conversation_ids']
     if not isinstance(identifiers, list) or not 1 <= len(identifiers) <= 200 or any(not isinstance(i, str) for i in identifiers):
@@ -330,7 +330,8 @@ def _snapshot(git, oid):
         if not isinstance(conversation, dict) or conversation.get('id') != identifier:
             raise GitBridgeError('Git 对话身份与文件名不一致')
         conversations.append(conversation)
-    canonical = build_package(conversations, library['title'], library['description'], source=library['source'])
+    canonical = build_package(conversations, library['title'], library['description'], source=library['source'],
+                              code_checkpoint=library.get('code_checkpoint'))
     checked = read_package(canonical)
     if checked['library'] != library or checked['conversations'] != conversations:
         raise GitBridgeError('Git JSON 必须使用导出的规范 ContextHub 格式')

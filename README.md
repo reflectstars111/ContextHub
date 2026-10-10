@@ -2,11 +2,25 @@
 
 > 一个面向 AI 对话的开源版本控制平台，让任何人的高质量 AI 对话都可以被保存、共享、复用、Fork 和持续演化。
 
-当前版本 **0.7.0**：ctx 支持分支、三方合并和普通 Git 仓库导入导出；Codex 可重建原生文本时间线；网页草稿自动保存，拥有者可修改可见性和永久清理对话库。
+面向 **vibe coding**，ContextHub 把对话像代码一样管理，并把对话版本与对应的代码提交关联。对话仓库可独立使用；`ctx checkpoint` 保存配对关系，`ctx restore` 在新目录恢复对应代码与对话，还可显式重建 Codex 会话。普通 Git 不会自动捕获 Agent 会话，详见[产品设计](docs/superpowers/specs/2026-10-10-github-conversations.md)。
+
+当前开发版本 **0.8.0**：新增代码检查点与同步恢复，采用 GitHub 风格的对话仓库页面、仓库列表和关联代码信息栏。保留分支、三方合并、Git 格式互通、草稿自动保存与公开/私有权限。部署中的服务版本以 `/api/config` 为准。
+
+```bash
+# 在已提交的 ctx 对话工作区内，关联一个干净的本地 Git 项目
+ctx checkpoint --code ../my-project -m '登录功能完成'
+ctx push
+
+# 恢复到新目录；当前代码和对话不被覆盖
+ctx restore HEAD --code ../my-project --to ../restored-login
+# 需要同时重建 Codex 会话时添加 --codex（多对话时另选 --conversation ID）
+```
+
+新目录包含 `code/`、`conversations/` 和 `receipt.json`。代码来源需已在本机拥有对应提交，独立恢复仓库只携带该提交的浅历史；查看、分享对话不会自动授权访问私有代码。对话改动后旧关联标为过期，不能直接用于同步恢复。[完整用法与首版限制](docs/cli.md#关联代码与同步恢复)。
 
 ## 在终端管理对话：ctx
 
-面向 Linux / 远程服务器 / VS Code 终端，同时提供 Windows 10/11 原生预览版（无需 WSL）。网站提供[单文件与 PowerShell 安装教程](https://contexthub.reflectstars.dev/cli)，只需 Python 3.12+，无需第三方 Python 包。0.6.0 已完成 Windows 11 本机的原生命令、DPAPI、文件锁和安装器验证，详见 [Windows 重构验证记录](docs/verification/2026-10-09-windows-cli-refactor.md)。0.7.0 新增功能的原生 Windows 验收仍待完成，继续保留预览标记；Windows 10/ARM64 不借用 Windows 11 AMD64 的验收结论。
+面向 Linux / 远程服务器 / VS Code 终端，同时提供 Windows 10/11 原生预览版（无需 WSL）。网站提供[单文件与 PowerShell 安装教程](https://contexthub.reflectstars.dev/cli)，只需 Python 3.12+，无需第三方 Python 包。0.6.0 已完成 Windows 11 本机的原生命令、DPAPI、文件锁和安装器验证，详见 [Windows 重构验证记录](docs/verification/2026-10-09-windows-cli-refactor.md)。0.8.0 新增功能的原生 Windows 验收仍待完成，继续保留预览标记；Windows 10/ARM64 不借用 Windows 11 AMD64 的验收结论。
 
 ```bash
 ctx auth login --username alice

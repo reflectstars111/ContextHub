@@ -408,6 +408,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, cli_archive(), 'application/octet-stream',
                               {'Content-Disposition': 'attachment; filename="ctx.pyz"'})
         allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/contributions.js': 'contributions.js', '/drafts.js': 'drafts.js', '/lifecycle.js': 'lifecycle.js', '/style.css': 'style.css', '/cli': 'cli.html', '/cli.css': 'cli.css'}
+        allowed.update({'/repository.css': 'repository.css', '/repository.js': 'repository.js'})
         if path not in allowed:
             raise HTTPError(404, '未找到页面')
         file = STATIC / allowed[path]
@@ -549,6 +550,7 @@ class Handler(BaseHTTPRequestHandler):
                     canonical = build_revision(base, {
                         'title': candidate['library']['title'],
                         'description': candidate['library']['description'],
+                        'code_checkpoint': candidate['library'].get('code_checkpoint'),
                         'conversations': candidate['conversations']})
                     checked = read_package(canonical)
                     fields = ('library', 'conversations', 'compatibility')

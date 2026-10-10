@@ -1,6 +1,6 @@
 # ctx：ContextHub 的终端工具
 
-适用 **Linux / 远程服务器 / VS Code 终端**，当前 0.7.0 提供 **Windows 10/11 原生预览版**，需要 Python 3.12+，无需 WSL。管理对话不需要模型服务或第三方 Python 库；本地 Codex 桥接另需安装 Codex CLI。Windows 11 本机已验证全部 `ctx` 命令、内核路径、DPAPI、锁与安装器，详见[重构验证记录](verification/2026-10-09-windows-cli-refactor.md)。0.7.0 新增功能的原生 Windows CI 尚待运行，因此保留预览标记。
+适用 **Linux / 远程服务器 / VS Code 终端**，当前 0.8.0 提供 **Windows 10/11 原生预览版**，需要 Python 3.12+，无需 WSL。管理对话不需要模型服务或第三方 Python 库；本地 Codex 桥接另需安装 Codex CLI。Windows 11 本机已验证全部 `ctx` 命令、内核路径、DPAPI、锁与安装器，详见[重构验证记录](verification/2026-10-09-windows-cli-refactor.md)。0.8.0 新增功能的原生 Windows CI 尚待运行，因此保留预览标记。
 
 ## 安装
 
@@ -161,6 +161,42 @@ ctx log
 分支共享不可变对象，各有独立 HEAD 和 Hub 绑定。新分支不继承原分支的远程库绑定，首次 push 会创建自己的库；切回原分支继续使用原绑定。切换要求没有未提交修改。旧版单分支工作区自动兼容迁移为 main。
 
 独立字段变化可合并；同字段不同修改、删除/编辑及不确定的顺序冲突要求人工解决。合并保存两个父提交，Hub 仍按线性公开版本接收当前分支快照，本地和 Git 导出保留完整分支 DAG。当前不提供 force、rebase、reset 或对象 GC。
+
+## 关联代码与同步恢复
+
+代码关联要求 ctx 和 Hub 均为 0.8.0 或更新版本；旧版 Hub 会拒绝含关联字段的包。在对话工作区内，将已保存的对话与代码提交建立检查点。代码仓库由 Git 管理，ctx 不自动提交你的代码。先处理代码和对话的未提交修改，再运行：
+
+```bash
+ctx checkpoint --code ../my-project -m '登录功能完成：保存对话与代码对应关系'
+ctx push
+```
+
+检查点包含准确的代码 commit/tree、对话内容摘要和可选的公开仓库地址；本机路径不随对话包传输。它是一个新的对话提交，随上传、下载、Fork 和 Git 格式互通保留。网页的“内容匹配”表示当前对话与记录一致，不是代码真实性认证。对话编辑后旧检查点过期，需要重新捕获；两条分支的代码检查点不会按字段拼接成未经确认的新状态。
+
+在另一台机器先取得对应代码仓库，并克隆网站上的固定对话版本，然后恢复：
+
+```bash
+ctx clone 'https://contexthub.reflectstars.dev/?package=PACKAGE_ID&version=VERSION_ID' my-dialogues
+cd my-dialogues
+ctx restore HEAD --code ../my-project --to ../restored-login
+```
+
+目标目录必须不存在。恢复结果包括 `code/`（位于固定提交的独立 Git 仓库）、`conversations/`（对应的 ctx 工作区）和 `receipt.json`。原来的代码、未提交编辑与对话工作区保留。恢复使用检查点的固定对象，不使用代码分支当前指向的位置；代码来源必须已在本机拥有那个提交。ctx 不自动联网拉取私有代码。
+
+需要同时创建可继续的 Codex 会话时，显式添加 `--codex`；有多段对话时，用包内的对话 ID 选择其中一段：
+
+```bash
+ctx restore HEAD --code ../my-project --to ../restored-login-codex --codex --conversation CONVERSATION_ID
+# 明确需要兼容注入方式时添加 --mode context
+```
+
+Codex 会话使用恢复后的 `code/` 作为项目目录，工具状态、附件与运行环境不会随代码恢复。默认 timeline 模式遵循已有 Codex 版本限制。恢复回执区分代码/对话配对恢复和原生会话导入；请求原生导入后若失败，不会将整项操作报告为成功。
+
+`--resume` 用于检查同一目标的已有恢复结果；它不会盲目覆盖文件或在原生导入结果不确定时重复创建会话。具体失败及后续处理以回执为准。配对准备失败时不发布目标目录，可以修复原因后重试；原生导入开始后的不确定结果需人工检查回执，不能盲目重试。
+
+首版支持 SHA-1 / SHA-256 普通 Git 工作区及 linked worktree。独立恢复仓库的分支名为 `restored`，仅保留指定提交的浅历史，不复制远端设置。最多 50,000 个文件和目录、单文件 32 MiB、代码总量及传输包各 256 MiB；子模块、符号链接、Git LFS 指针及存在大小写冲突或 Windows 保留名称的路径会被拒绝。
+
+检查点捕获要求工作文件与 Git 对象字节一致，不运行 clean/smudge 过滤器；自动转为 CRLF 的工作区也会停止，请使用与对象字节一致的独立 checkout。原有工作区不会被自动转换。如果 ctx 对话工作区位于代码目录内，需明确将其加入 Git 忽略规则，或将两者放在不同目录。
 
 ## 与普通 Git 仓库互通
 

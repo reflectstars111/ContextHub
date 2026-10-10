@@ -27,11 +27,14 @@ def save(path, data, force=False):
 
 
 def inspect_package(package):
+    from .checkpoints import checkpoint_status
     from .platforms import package_platforms
     return {'title': package['library'].get('title'), 'conversation_count': len(package['conversations']),
             'platforms': package_platforms(package),
             'conversations': [{'id': c['id'], 'title': c['title'], 'message_count': len(c['messages'])} for c in package['conversations']],
-            'compatibility': package['compatibility']}
+            'compatibility': package['compatibility'],
+            'code_checkpoint': package['library'].get('code_checkpoint'),
+            'code_checkpoint_status': checkpoint_status(package)}
 
 
 def http_url(value):

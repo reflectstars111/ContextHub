@@ -212,7 +212,7 @@ def _check_size(path, data):
         raise PackageError(f"{path} exceeds its {limit}-byte limit")
 
 
-def build_package(conversations, title, description='', source=None) -> bytes:
+def build_package(conversations, title, description='', source=None, code_checkpoint=None) -> bytes:
     """Normalize selected conversations and return a deterministic .contextpack.
 
     Unknown fields are omitted rather than exporting arbitrary application
@@ -227,6 +227,9 @@ def build_package(conversations, title, description='', source=None) -> bytes:
         "source": source,
         "conversation_ids": [conversation["id"] for conversation in conversations],
     }
+    if code_checkpoint is not None:
+        from .checkpoints import validate_checkpoint
+        library["code_checkpoint"] = validate_checkpoint(code_checkpoint)
     entries = {
         "library.json": _json_bytes(library),
         "compatibility.json": _json_bytes(_compatibility(conversations, source)),
@@ -380,6 +383,9 @@ def read_package(data) -> dict:
         "source": _metadata(library.get("source"), "library.source", _SOURCE_KEYS),
         "conversation_ids": [conversation["id"] for conversation in normalized],
     }
+    if "code_checkpoint" in library:
+        from .checkpoints import validate_checkpoint
+        expected_library["code_checkpoint"] = validate_checkpoint(library["code_checkpoint"])
     if library != expected_library:
         raise PackageError("Library fields or conversation order are inconsistent")
     compatibility = _load_json(entries["compatibility.json"], "compatibility.json")

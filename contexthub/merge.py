@@ -236,6 +236,9 @@ def _validate(package):
         "source": _metadata(library.get("source"), "library.source", _SOURCE_KEYS),
         "conversation_ids": [conversation["id"] for conversation in conversations],
     }
+    if "code_checkpoint" in library:
+        from .checkpoints import validate_checkpoint
+        expected["code_checkpoint"] = validate_checkpoint(library["code_checkpoint"])
     if library != expected:
         raise PackageError("Merge library data or conversation order is not canonical")
     manifest = package["manifest"]
@@ -269,6 +272,14 @@ def merge_packages(base, target, source):
     for key in ("title", "description"):
         library[key] = _field(base["library"][key], target["library"][key], source["library"][key],
                               "/library/" + key, conflicts)
+    # A checkpoint is one indivisible claim about a verified commit/tree pair.
+    # Recursive field merging could invent a combination that neither side
+    # recorded, yet still retain a matching conversation digest.
+    old, ours, theirs = (package["library"].get("code_checkpoint")
+                         for package in (base, target, source))
+    if ours != theirs and ours != old and theirs != old:
+        conflicts.add("/library/code_checkpoint", "field", old, ours, theirs)
+    library["code_checkpoint"] = copy.deepcopy(theirs if ours == old else ours)
     conversations = _entities(base["conversations"], target["conversations"], source["conversations"],
                               "/conversations", conflicts, "conversation")
     if conflicts.count:

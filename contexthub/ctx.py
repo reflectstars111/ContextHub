@@ -70,6 +70,17 @@ def parser():
     command.add_argument('ref')
     command.add_argument('-m', '--message')
     command.add_argument('--resolved', action='store_true', help='将已检查、暂存的文件作为人工解决结果')
+    command = sub.add_parser('checkpoint', help='将干净的代码提交关联到当前对话版本')
+    command.add_argument('--code', required=True, help='本地 Git 代码仓库路径')
+    command.add_argument('-m', '--message', required=True)
+    command = sub.add_parser('restore', help='在新目录同步恢复指定版本的对话与关联代码')
+    command.add_argument('ref')
+    command.add_argument('--code', required=True, help='包含关联提交的本地 Git 仓库')
+    command.add_argument('--to', required=True, help='不存在的恢复目标目录')
+    command.add_argument('--codex', action='store_true', help='恢复完成后导入本机 Codex')
+    command.add_argument('--conversation', help='要导入 Codex 的对话 ID')
+    command.add_argument('--mode', choices=('timeline', 'context'), default='timeline')
+    command.add_argument('--resume', action='store_true', help='核验并复用已完成恢复；不重复原生导入')
     git = sub.add_parser('git', help='与本地普通 Git 仓库双向交换受管对话和历史').add_subparsers(dest='git_action', required=True)
     command = git.add_parser('export', help='导出分支和提交到新的普通 Git 仓库')
     command.add_argument('directory')
@@ -337,6 +348,13 @@ def run(args):
         from .git_bridge import import_git
         return import_git(args.repository, args.directory)
     ws = Workspace.find(Path.cwd())
+    if args.action == 'checkpoint':
+        from .code_sync import capture_checkpoint
+        return capture_checkpoint(ws, args.code, args.message)
+    if args.action == 'restore':
+        from .code_sync import restore_pair
+        return restore_pair(ws, args.ref, args.code, args.to, codex=args.codex,
+                            conversation=args.conversation, mode=args.mode, resume=args.resume)
     if args.action == 'git':
         from .git_bridge import export_git
         return export_git(ws, args.directory)
@@ -422,7 +440,7 @@ def _display(args, value):
     elif args.action == 'merge':
         print('已合并' if value['merged'] else '已包含目标分支')
         _print_status(value['status'])
-    elif args.action == 'git':
+    elif args.action in ('git', 'checkpoint', 'restore'):
         print(_safe(json.dumps(value, ensure_ascii=False, indent=2)))
     elif args.action == 'commit':
         print(_safe(f"已提交 {value['id'][:12]}  {value['message']}"))
@@ -488,7 +506,8 @@ def main(argv=None):
                         '\n远程版本已更新；本地内容保留，请使用 ctx pull 合并后重新 push。')
         if as_json:
             print(json.dumps({'error': message, **({'status': status} if status else {}),
-                              **({'merge': exc.details} if isinstance(exc, MergeConflict) else {})}, ensure_ascii=False), file=sys.stderr)
+                              **({'merge': exc.details} if isinstance(exc, MergeConflict) else {}),
+                              **({'receipt': exc.receipt} if hasattr(exc, 'receipt') else {})}, ensure_ascii=False), file=sys.stderr)
         else:
             print('错误：' + _safe(message), file=sys.stderr)
             if isinstance(exc, MergeConflict):

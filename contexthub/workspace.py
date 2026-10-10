@@ -526,13 +526,17 @@ class Workspace:
         library = _load_json(raw_library, 'library.json')
         if snapshot is not None:
             snapshot['library.json'] = _hash(raw_library)
-        if (set(library) != {'schema_version', 'title', 'description', 'source', 'conversation_ids'}
+        if (not isinstance(library, dict)
+                or set(library) - {'code_checkpoint'} != {'schema_version', 'title', 'description', 'source', 'conversation_ids'}
                 or library['schema_version'] != '0.1'
                 or not isinstance(library['conversation_ids'], list)
                 or len(library['conversation_ids']) > MAX_CONVERSATIONS
                 or any(not isinstance(item, str) for item in library['conversation_ids'])
                 or len(set(library['conversation_ids'])) != len(library['conversation_ids'])):
             raise WorkspaceError('library.json 的字段或 conversation_ids 无效')
+        if 'code_checkpoint' in library:
+            from .checkpoints import validate_checkpoint
+            validate_checkpoint(library['code_checkpoint'])
         conversations = []
         total = 0
         for identifier in library['conversation_ids']:
@@ -544,7 +548,7 @@ class Workspace:
             if total > MAX_TOTAL_BYTES:
                 raise WorkspaceError('工作树超过大小限制')
             item = _load_json(data, name)
-            if item.get('id') != identifier:
+            if not isinstance(item, dict) or item.get('id') != identifier:
                 raise WorkspaceError(f'对话 ID 与 library.json 不一致：{name}')
             conversations.append(item)
         if original is not None:
@@ -560,7 +564,8 @@ class Workspace:
         if not conversations:
             # Validate empty workspace metadata using the same bounded format.
             build_package([{'id': 'validation', 'messages': []}], library['title'],
-                          library['description'], source=library['source'])
+                          library['description'], source=library['source'],
+                          code_checkpoint=library.get('code_checkpoint'))
             return _empty_package(library), None
         if state['head']:
             base_data = self._object(self._commit_record(state['head'])['sha256'])
@@ -568,9 +573,11 @@ class Workspace:
             if library['source'] != base['library']['source']:
                 raise WorkspaceError('已有对话库的来源记录不可改写；可修改标题、说明和对话正文')
             data = _revision_data(base_data, {'title': library['title'], 'description': library['description'],
-                                              'conversations': conversations})
+                                              'conversations': conversations,
+                                              'code_checkpoint': library.get('code_checkpoint')})
         else:
-            data = build_package(conversations, library['title'], library['description'], source=library['source'])
+            data = build_package(conversations, library['title'], library['description'], source=library['source'],
+                                 code_checkpoint=library.get('code_checkpoint'))
         return read_package(data), data
 
     @property
@@ -615,13 +622,19 @@ class Workspace:
                     raise WorkspaceError(f'对话 ID 已存在且内容不同：{item["id"]}；检查后使用 --replace')
                 conversations[item['id']] = item
             library = current['library']
+            checkpoint = library.get('code_checkpoint')
+            incoming_checkpoint = incoming['library'].get('code_checkpoint')
+            if incoming_checkpoint is not None:
+                if checkpoint is not None and checkpoint != incoming_checkpoint:
+                    raise WorkspaceError('导入内容关联了不同的代码检查点；请在新工作区导入，避免覆盖现有代码关联')
+                checkpoint = incoming_checkpoint
             if state['head']:
                 data = _revision_data(self.package_bytes(), {
                     'title': library['title'], 'description': library['description'],
-                    'conversations': list(conversations.values())})
+                    'conversations': list(conversations.values()), 'code_checkpoint': checkpoint})
             else:
                 data = build_package(list(conversations.values()), library['title'],
-                                     library['description'], source=library['source'])
+                                     library['description'], source=library['source'], code_checkpoint=checkpoint)
             package = read_package(data)
             state['index'] = self._save_object(data)
             self._transition(state, self._files(package), expected=expected)
@@ -648,6 +661,23 @@ class Workspace:
             record = self._save_commit(self._object(state['index']), message, state['head'])
             state['head'] = record['id']
             self._write_state(state)
+            return record
+
+    def record_code_checkpoint(self, checkpoint, message):
+        """Record a code link as a new immutable conversation commit.
+
+        The caller verifies a clean code checkout; this layer binds its claim to
+        the exact committed conversation snapshot and refuses pending edits.
+        """
+        from .checkpoints import attach_checkpoint
+        with self.locked():
+            expected = self._clean_snapshot()
+            state = self._state()
+            data = attach_checkpoint(self.package_bytes(), checkpoint)
+            package = read_package(data)
+            record = self._save_commit(data, message, state['head'])
+            state.update(head=record['id'], index=record['sha256'])
+            self._transition(state, self._files(package), expected=expected)
             return record
 
     def _resolve(self, ref, state=None):

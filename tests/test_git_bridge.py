@@ -56,6 +56,21 @@ class GitBridgeTests(unittest.TestCase):
         for record in self.ws.history():
             self.assertEqual(restored.package_bytes(record['id']), self.ws.package_bytes(record['id']))
 
+    def test_code_checkpoint_survives_git_history_roundtrip(self):
+        from contexthub.checkpoints import attach_checkpoint, checkpoint_status
+        blob = attach_checkpoint(self.ws.package_bytes(), {
+            'repository_url': 'https://github.com/example/synthetic',
+            'commit': 'a' * 40, 'tree': 'b' * 40, 'branch': 'main',
+            'captured_at': '2026-10-10T00:00:00Z', 'verification': 'local_clean',
+        })
+        checkpoint = read_package(blob)['library']['code_checkpoint']
+        self.ws.record_code_checkpoint(checkpoint, 'link exact code revision')
+        export_git(self.ws, self.repo)
+        import_git(self.repo, self.target)
+        restored = Workspace(self.target)
+        self.assertEqual(restored.package_bytes(), self.ws.package_bytes())
+        self.assertEqual(checkpoint_status(read_package(restored.package_bytes())), 'matched')
+
     def test_standard_git_json_commit_imports_as_new_ctx_revision(self):
         export_git(self.ws, self.repo)
         path = next((self.repo / 'conversations').glob('*.json'))

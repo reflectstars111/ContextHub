@@ -42,6 +42,7 @@ function clearDraftState() {
 }
 function draftChanged() {
   if (!isDraft()) return;
+  if (typeof renderRepository === "function") renderRepository(state.reader);
   versionState.preview = null;
   $("save-version").disabled = true;
   $("draft-status").textContent = "草稿已更新，请重新预览";
@@ -53,6 +54,7 @@ function renderVersionWorkspace(data) {
   $("version-workspace").hidden = !hub;
   renderPackageContributions(data);
   renderLibrarySettings(data);
+  if (typeof renderRepository === "function") renderRepository(data);
   if (!hub) return;
   const draft = isDraft();
   const version = data.version || {};
@@ -118,7 +120,7 @@ async function startDraft() {
   $("save-version").textContent = original.visibility === "public" ? "发布新版本" : "保存新版本";
   $("draft-boundary").textContent = "草稿自动保存到服务器，仅你可见。" + (original.visibility === "public" ? "发布后，任何人都能阅读新版本，登录后可下载。" : "保存的新版本也仅你可见。") + "历史版本保持不变。";
   clearCandidate();
-  openReader({ ...structuredClone(original), ...(draft ? { conversations: structuredClone(draft.conversations) } : {}), kind: "draft" });
+  openReader({ ...structuredClone(original), ...(draft ? { conversations: structuredClone(draft.conversations), code_checkpoint: structuredClone(draft.code_checkpoint || null) } : {}), kind: "draft" });
   if (draft) {
     draftStorage.signature = JSON.stringify(privateDraftPayload());
     draftStorageStatus("已恢复服务器草稿，仅你可见");
@@ -150,7 +152,8 @@ function versionPayload() {
   if (!title) { $("draft-title").focus(); throw new Error("请填写对话库标题。"); }
   if (!message) { $("version-message").focus(); throw new Error("请填写本次保存说明。"); }
   return { base_version: versionState.original.version.id, expected_visibility: versionState.original.visibility,
-    title, description: $("draft-description").value.trim(), conversations: state.reader.conversations, message };
+    title, description: $("draft-description").value.trim(), conversations: state.reader.conversations,
+    code_checkpoint: state.reader.code_checkpoint || null, message };
 }
 async function previewDraft() {
   versionState.preview = null;
@@ -269,6 +272,7 @@ function applyCandidate() {
   if (!isDraft() || !versionState.candidate || !requireSavedEditor()) return;
   const candidate = versionState.candidate;
   state.reader.conversations = structuredClone(candidate.conversations);
+  state.reader.code_checkpoint = structuredClone(candidate.library.code_checkpoint || null);
   $("draft-title").value = candidate.library.title || "";
   $("draft-description").value = candidate.library.description || "";
   state.conversationIndex = 0;

@@ -496,11 +496,14 @@ class Store(LibraryState):
         return (self.blobs / (row['sha256'] + '.contextpack')).read_bytes()
 
     def detail(self, ident, user_id=None, version_id=None):
+        from .checkpoints import checkpoint_status
         row = self._selected(ident, user_id, version_id)
         package = read_package((self.blobs / (row['sha256'] + '.contextpack')).read_bytes())
         return {**row, 'title': package['library']['title'], 'description': package['library']['description'],
                 'conversations': package['conversations'], 'compatibility': package['compatibility'],
-                'library_source': package['library']['source'], 'platforms': package_platforms(package)}
+                'library_source': package['library']['source'], 'platforms': package_platforms(package),
+                'code_checkpoint': package['library'].get('code_checkpoint'),
+                'code_checkpoint_status': checkpoint_status(package)}
 
     def versions(self, ident, user_id=None):
         with self.db() as db:

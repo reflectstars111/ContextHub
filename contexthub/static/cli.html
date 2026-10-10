@@ -13,7 +13,7 @@
       <p class="eyebrow">CONVERSATIONS, VERSIONED.</p>
       <h1>在终端里，<br>让对话持续演化。</h1>
       <p class="lead">用熟悉的 add、commit、push 和 pull，管理你的 AI 对话。<br>本地整理，提交留档，与 ContextHub 同步。</p>
-      <div class="actions"><a class="button" href="/ctx.pyz" download>下载 ctx · 0.7.0</a><a href="#windows">Windows 安装 ↓</a><a href="#install">Linux 安装 ↓</a></div>
+      <div class="actions"><a class="button" href="/ctx.pyz" download>下载 ctx · 0.8.0</a><a href="#windows">Windows 安装 ↓</a><a href="#install">Linux 安装 ↓</a></div>
       <p class="note">Windows 预览版 / Linux · Python 3.12+ · 运行时无第三方 Python 依赖 · MIT 开源</p>
     </section>
     <div class="benefits"><article><span>01</span><h2>整理多种来源</h2><p>导入 Codex 对话包、Claude 和 DeepSeek 导出文件，在同一工作区管理。</p></article><article><span>02</span><h2>每次修改有记录</h2><p>先查看差异，再提交版本。提交保存在本机，运行 push 才会上传。</p></article><article><span>03</span><h2>跨机器继续整理</h2><p>克隆固定版本，拉取更新。独立修改自动合并，冲突保留双方内容。</p></article></div>
@@ -68,6 +68,15 @@ ctx clone 'https://contexthub.reflectstars.dev/?package=仓库ID' my-copy
 cd my-copy
 ctx pull</code></pre>
       <p class="note">add . 只暂存受管的对话文件，不扫描项目。pull 要求工作区干净；有本地和远端新提交时，独立修改会自动合并。冲突时保留双方快照并输出 incoming 分支，编辑后可显式解决。支持 branch、switch、merge，不支持强制覆盖。clone 取得所选快照，log 记录此后本地的提交；网站可查看完整远程历史。</p>
+    </section>
+    <section id="code-checkpoints"><h2>让对话与代码一起恢复</h2><p>在对话工作区中，将已保存对话关联到干净代码仓库的固定提交。修改对话后，旧关联会标为过期，需要重新建立检查点。</p>
+<pre><code>ctx checkpoint --code ../my-project -m "登录功能完成"
+ctx push
+ctx restore HEAD --code ../my-project --to ../restored-login
+# 同时创建 Codex 新会话：添加 --codex
+# 多段对话时另选 --conversation CONVERSATION_ID</code></pre>
+      <p class="note">目标必须是新目录，包含 code/、conversations/ 和 receipt.json。现有工作保留；代码需已在本机取得。可用 --resume 核验已有配对，不会重复创建原生会话。Codex 导入结果不确定时停止自动重试，请检查回执。</p>
+      <p class="note">支持普通文件 Git 仓库；首版不恢复子模块、符号链接、LFS 指针或经过滤器/换行转换的工作文件。代码恢复为固定提交的独立浅历史仓库。对话库权限与 GitHub 代码权限分别管理。</p>
     </section>
     <section><h2>复用别人的对话</h2><p>公开库可匿名阅读，所有克隆、下载与写操作均须登录。修改别人的库时，先创建自己的 Fork。</p>
 <pre><code>ctx fork 'https://contexthub.reflectstars.dev/?package=仓库ID' my-fork

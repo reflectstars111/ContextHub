@@ -243,7 +243,7 @@ function configureNavigation() {
     button.append(node("span", "nav-icon", icon), node("span", "", title));
     nav.append(button);
   }
-  $("mode-label").textContent = state.mode === "connector" ? "本地 Codex 连接器" : "ContextHub · 对话分享";
+  $("mode-label").textContent = state.mode === "connector" ? "本地 Codex 连接器" : "Vibe coding · 对话版本管理";
   $("boundary-note").textContent = state.mode === "connector" ? "仅连接本机 Codex。令牌保存在此标签页，内容不会自动上传。" : "Hub 保存你主动上传的对话文件。来源分类不代表平台认证，也不保证原平台回导。";
   $("account-button").hidden = state.mode === "connector";
 }
@@ -270,7 +270,7 @@ async function loadPackages() {
     const response = await api(`/api/packages?${parameters}`);
     if (request !== state.packageRequest) return;
     state.packages = response.packages || [];
-    $("package-count").textContent = `${state.packages.length} 个对话包`;
+    $("package-count").textContent = `${state.packages.length}`;
     const grid = $("package-grid");
     grid.replaceChildren();
     if (!state.packages.length) {
@@ -280,16 +280,14 @@ async function loadPackages() {
     }
     for (const pack of state.packages) {
       const card = node("article", "package-card");
-      const top = node("div", "card-top");
-      top.append(node("span", "card-icon", "▤"), node("span", `visibility-badge${pack.visibility === "private" ? " private" : ""}`, pack.visibility === "private" ? "仅自己" : "公开"));
       const heading = node("h3");
-      heading.append(action(pack.title || "未命名对话包", "card-title", () => perform(() => loadPackage(pack.id))));
       const footer = node("div", "card-bottom");
       const author = node("span", "card-author");
       const username = typeof pack.author === "object" ? pack.author.username : pack.author;
+      heading.append(node("span", "card-icon", "▤"), node("span", "repository-row-owner", `${username || "未知作者"} / `), action(pack.title || "未命名对话包", "card-title", () => perform(() => loadPackage(pack.id))), node("span", `visibility-badge${pack.visibility === "private" ? " private" : ""}`, pack.visibility === "private" ? "私有" : "公开"));
       author.append(node("span", "author-avatar", (username || "?").slice(0, 1).toUpperCase()), node("span", "", username || "未知作者"));
       footer.append(author, node("span", "", `${pack.conversation_count ?? "—"} 段对话${pack.version_count ? ` · ${pack.version_count} 个版本` : ""} · ${formatDate(pack.created_at)}`));
-      card.append(top, heading, platformBadges(pack.platforms), node("p", "card-description", pack.description || "这个对话包还没有描述。"), footer);
+      card.append(heading, node("p", "card-description", pack.description || "这个对话包还没有描述。"), platformBadges(pack.platforms), footer);
       grid.append(card);
     }
   } finally { if (request === state.packageRequest) $("package-grid").removeAttribute("aria-busy"); }

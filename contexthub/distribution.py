@@ -8,7 +8,7 @@ import zipfile
 
 MODULES = ('__init__', '__main__', 'cli_runtime', 'codex', 'ctx', 'hub_client', 'workspace',
            'importers', 'package', 'platforms', 'revisions', 'safe_fs', 'windows_credentials',
-           'windows_launcher', 'merge', 'git_bridge', 'codex_timeline')
+           'windows_launcher', 'merge', 'git_bridge', 'codex_timeline', 'checkpoints', 'code_sync')
 ENTRY_POINT = '''import sys
 if sys.version_info < (3, 12) or sys.platform not in ('linux', 'win32'):
     sys.exit('ctx requires Windows or Linux with Python 3.12 or newer.')

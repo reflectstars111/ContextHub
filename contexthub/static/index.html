@@ -4,30 +4,30 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>ContextHub · 对话随行</title>
+  <title>ContextHub · Vibe coding 对话仓库</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/repository.css">
   <script src="/drafts.js" defer></script>
   <script src="/lifecycle.js" defer></script>
   <script src="/versions.js" defer></script>
   <script src="/contributions.js" defer></script>
+  <script src="/repository.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar" aria-label="主导航">
-      <a class="brand" href="/" aria-label="ContextHub 首页"><span class="brand-mark" aria-hidden="true">c<span>h</span></span><span>ContextHub<small>让上下文继续发生</small></span></a>
-      <div class="mode-label"><span class="status-dot"></span><span id="mode-label">正在连接服务</span></div>
-      <nav class="nav-list" id="nav-list"></nav>
-      <div class="sidebar-bottom"><span class="tiny-label">KEEP THE CONTEXT</span><p>留下思考的来路，<br>带走完整的上下文。</p><div class="local-note" id="boundary-note">正在读取服务配置…</div></div>
-    </aside>
+    <header class="global-header">
+      <a class="brand" href="/" aria-label="ContextHub 首页"><span class="brand-mark" aria-hidden="true">ch</span><span>ContextHub</span></a>
+      <nav class="nav-list" id="nav-list" aria-label="主导航"></nav>
+      <div class="global-header-actions"><a class="button button-quiet" href="/cli" id="cli-guide-link">终端工具 ctx</a><span class="account-name" id="account-name"></span><button class="button button-quiet" id="account-button" hidden>登录 / 注册</button></div>
+    </header>
     <div class="workspace">
-      <header class="topbar"><div class="breadcrumb"><span>工作空间</span><span class="breadcrumb-slash">/</span><strong id="breadcrumb">对话库</strong></div><div class="topbar-actions"><a class="button button-quiet" href="/cli" id="cli-guide-link">终端工具 ctx</a><span class="account-name" id="account-name"></span><button class="button button-quiet" id="account-button" hidden>登录 / 注册</button></div></header>
+      <div class="topbar"><div class="breadcrumb"><span>ContextHub</span><span class="breadcrumb-slash">/</span><strong id="breadcrumb">对话库</strong></div><div class="mode-label"><span class="status-dot"></span><span id="mode-label">正在连接服务</span></div></div>
       <main id="main-content">
         <div id="status" class="notice status-message" role="status" aria-live="polite" hidden></div>
         <section id="library-view" class="view" hidden aria-labelledby="library-title">
-          <div class="page-heading"><div><span class="eyebrow">YOUR CONVERSATION LIBRARY</span><h1 id="library-title">每段对话，都有下一站。</h1><p>收藏、分享与迁移 AI 对话，让有价值的上下文延续下去。</p></div><button class="button button-primary" id="open-upload"><span aria-hidden="true">＋</span> 上传对话包</button></div>
-          <div class="intro-banner"><div class="banner-symbol" aria-hidden="true">↗</div><div><h2>把一次对话，变成可带走的知识</h2><p>集中保存 Codex、ChatGPT、Claude、DeepSeek 对话。可识别的格式统一阅读，其他文本按来源分类存档。</p></div><span class="pill">开放格式 · 你的内容</span></div>
-          <div class="section-toolbar"><div><h2>对话库 <span class="count-label" id="package-count"></span></h2><p class="subtle">公开对话，以及登录后仅你可见的私有对话</p></div><form id="search-form" class="search-box" role="search"><label class="sr-only" for="search-input">搜索对话包</label><span aria-hidden="true">⌕</span><input id="search-input" name="q" placeholder="搜索标题、描述…" autocomplete="off"><button type="submit" class="search-submit">搜索</button></form></div>
+          <div class="page-heading"><div><h1 id="library-title">对话仓库</h1><p>管理 AI 对话的版本、贡献与关联代码，继续你的下一次开发。</p></div><button class="button button-primary" id="open-upload"><span aria-hidden="true">＋</span> 上传对话包</button></div>
+          <div class="section-toolbar"><div><h2>对话库 <span class="count-label" id="package-count"></span></h2><p class="subtle">公开仓库与仅自己可见的私有仓库</p></div><form id="search-form" class="search-box" role="search"><label class="sr-only" for="search-input">搜索对话包</label><span aria-hidden="true">⌕</span><input id="search-input" name="q" placeholder="搜索标题、描述…" autocomplete="off"><button type="submit" class="search-submit">搜索</button></form></div>
           <div class="platform-filter-row"><label for="platform-filter">来源分类</label><select id="platform-filter" class="text-input"><option value="all">全部来源</option><option value="codex">Codex</option><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option><option value="deepseek">DeepSeek</option><option value="other">其他</option></select><span class="field-help">来源由导入记录声明，不代表平台认证或支持原平台回导。</span></div>
           <div id="package-grid" class="package-grid"></div>
         </section>
@@ -44,15 +44,21 @@
           <div id="inspect-result" hidden></div><div id="import-receipt" hidden></div>
         </section>
         <section id="reader-view" class="view" hidden aria-labelledby="reader-title">
-          <button class="back-button" id="reader-back">← 返回对话库</button><div class="reader-heading"><div><div class="eyebrow" id="reader-eyebrow">CONVERSATION</div><h1 id="reader-title"></h1><p id="reader-description"></p><div class="metadata-row" id="reader-metadata"></div></div><div class="reader-primary-actions"><button class="button button-primary" id="download-package">下载完整对话包</button><button class="button button-danger-quiet" id="delete-package" hidden>删除</button></div></div>
+          <button class="back-button" id="reader-back">← 返回对话库</button><div class="reader-heading"><div><div class="eyebrow" id="reader-eyebrow">CONVERSATION</div><div class="repository-name"><span id="reader-owner"></span><span class="repository-slash" aria-hidden="true">/</span><h1 id="reader-title"></h1><span id="repository-visibility" class="visibility-badge"></span></div><p id="reader-description"></p><div class="metadata-row" id="reader-metadata"></div></div><div class="reader-primary-actions"><button class="button button-primary" id="download-package">下载完整对话包</button><button class="button button-danger-quiet" id="delete-package" hidden>删除</button></div></div>
+          <nav class="repository-navigation" id="repository-navigation" aria-label="仓库导航">
+            <a href="#conversation-section" class="repository-nav-item active" data-repository-section="conversation-section" aria-current="location"><span aria-hidden="true">▤</span> 对话</a>
+            <a href="#version-workspace" class="repository-nav-item" data-repository-section="version-workspace"><span aria-hidden="true">◷</span> 版本历史</a>
+            <a href="#package-contributions-panel" class="repository-nav-item" data-repository-section="package-contributions-panel"><span aria-hidden="true">⑂</span> 贡献请求</a>
+            <a href="#code-checkpoint-panel" class="repository-nav-item" data-repository-section="code-checkpoint-panel"><span aria-hidden="true">⌘</span> 关联代码</a>
+            <a href="#library-settings" class="repository-nav-item" data-repository-section="library-settings" id="repository-settings-tab"><span aria-hidden="true">⚙</span> 设置</a>
+          </nav>
+          <div class="repository-columns"><div class="repository-main">
           <div id="version-workspace" hidden>
             <div id="upstream-info" class="upstream-info" hidden></div>
             <div class="version-toolbar"><div class="version-choice"><label for="version-select">版本历史</label><select id="version-select" class="text-input"></select><span id="version-position" class="pill"></span></div><div class="version-actions"><button id="copy-version-link" class="button button-small">复制此版本链接</button><button id="compare-versions" class="button button-small">比较版本</button><button id="fork-package" class="button button-secondary" hidden>Fork 到我的对话库</button><button id="open-contribution" class="button button-secondary" hidden>贡献给上游</button><button id="edit-package" class="button button-primary" hidden>编辑副本</button></div></div>
             <p id="version-description" class="version-description"></p>
             <div id="draft-recovery" class="notice" hidden>你有一份仅自己可见的服务器草稿。<button id="restore-draft" class="button button-small">恢复草稿</button></div>
-            <details id="library-settings" class="panel" hidden><summary>对话库设置</summary><p class="field-help">可见性变更适用于所有历史版本。已经下载或 Fork 的内容无法撤回。</p><div class="draft-actions"><button id="change-visibility" class="button button-secondary">修改可见性</button><button id="purge-package" class="button button-danger-quiet">永久清理此库</button></div><p class="field-help">永久清理删除此库的版本、草稿与记录；其他库依赖的共享内容和独立备份保留。</p></details>
-            <p id="contribution-boundary" class="field-help" hidden></p>
-            <details id="package-contributions-panel" class="panel package-contributions" open><summary>贡献请求 <span id="package-contribution-count" class="count-label"></span></summary><p class="subtle">查看别人带来的改进，以及这个 Fork 向上游提交的变化。</p><div id="package-contributions" aria-live="polite"></div></details>
+
             <div id="draft-panel" class="panel draft-panel" hidden>
               <div class="draft-heading"><div><span class="eyebrow">WORKING COPY</span><h2>编辑下一版</h2><p class="subtle" id="draft-boundary">草稿自动保存到服务器，仅你可见。预览并发布后才会写入版本历史。</p></div><button id="discard-draft" class="button button-danger-quiet">丢弃草稿</button></div>
               <div class="draft-fields"><div><label class="field-label" for="draft-title">对话库标题</label><input id="draft-title" class="text-input" maxlength="200"></div><div><label class="field-label" for="draft-description">描述</label><input id="draft-description" class="text-input" maxlength="2000"></div></div>
@@ -65,8 +71,18 @@
             </div>
             <div id="compare-panel" class="panel compare-panel" hidden><div class="draft-heading"><h2>比较两个版本</h2><button id="close-comparison" class="button button-small">收起</button></div><div class="compare-controls"><label for="compare-from">从</label><select id="compare-from" class="text-input"></select><span aria-hidden="true">→</span><label for="compare-to">到</label><select id="compare-to" class="text-input"></select><button id="run-comparison" class="button button-secondary">查看变化</button></div><div id="version-comparison" aria-live="polite"></div></div>
           </div>
-          <div id="reader-warnings" hidden></div><div id="export-options" class="panel export-options" hidden><div><label class="field-label" for="export-title">对话包标题</label><input class="text-input" id="export-title" maxlength="200" placeholder="为这些对话取一个名字"></div><div><label class="field-label" for="export-description">简短描述</label><input class="text-input" id="export-description" maxlength="2000" placeholder="这些上下文适合在什么时候使用"></div><label class="redact-option"><input id="redact-secrets" type="checkbox" checked> 自动脱敏常见凭据</label><p class="field-help">导出前请检查正文。自动脱敏无法识别所有敏感信息，你可以逐条编辑或移除消息。</p></div>
-          <div class="reader-layout"><aside class="conversation-sidebar"><div class="tiny-label">包内对话</div><div id="conversation-tabs" class="conversation-tabs"></div><div class="reader-note">来源与编辑记录会随对话保留。未知或未支持的内容会在兼容性报告中注明。</div></aside><article class="conversation-content"><div class="conversation-toolbar"><h2 id="conversation-title"></h2><div class="copy-actions"><label class="sr-only" for="copy-format">导出格式</label><select id="copy-format"><option value="markdown">Markdown</option><option value="json">JSON</option></select><button class="button button-small" id="copy-conversation">复制</button><button class="button button-small" id="save-conversation">保存</button><button class="button button-small" id="save-archive" hidden>下载存档文本</button></div></div><div id="conversation-provenance"></div><div id="messages" class="messages"></div></article></div>
+          <details id="reader-report" class="repository-report"><summary>导入与兼容性说明</summary><div id="reader-warnings" hidden></div></details><div id="export-options" class="panel export-options" hidden><div><label class="field-label" for="export-title">对话包标题</label><input class="text-input" id="export-title" maxlength="200" placeholder="为这些对话取一个名字"></div><div><label class="field-label" for="export-description">简短描述</label><input class="text-input" id="export-description" maxlength="2000" placeholder="这些上下文适合在什么时候使用"></div><label class="redact-option"><input id="redact-secrets" type="checkbox" checked> 自动脱敏常见凭据</label><p class="field-help">导出前请检查正文。自动脱敏无法识别所有敏感信息，你可以逐条编辑或移除消息。</p></div>
+          <div class="reader-layout" id="conversation-section"><aside class="conversation-sidebar"><div class="tiny-label">对话目录</div><div id="conversation-tabs" class="conversation-tabs"></div><div class="reader-note">来源与编辑记录会随对话保留。未知或未支持的内容会在兼容性报告中注明。</div></aside><article class="conversation-content"><div class="conversation-toolbar"><h2 id="conversation-title"></h2><div class="copy-actions"><label class="sr-only" for="copy-format">导出格式</label><select id="copy-format"><option value="markdown">Markdown</option><option value="json">JSON</option></select><button class="button button-small" id="copy-conversation">复制</button><button class="button button-small" id="save-conversation">保存</button><button class="button button-small" id="save-archive" hidden>下载存档文本</button></div></div><div id="conversation-provenance"></div><div id="messages" class="messages"></div></article></div>
+          <div class="repository-collaboration">
+            <p id="contribution-boundary" class="field-help" hidden></p>
+            <details id="package-contributions-panel" class="panel package-contributions" open><summary>贡献请求 <span id="package-contribution-count" class="count-label"></span></summary><p class="subtle">查看别人带来的改进，以及这个 Fork 向上游提交的变化。</p><div id="package-contributions" aria-live="polite"></div></details>
+            <details id="library-settings" class="panel" hidden><summary>对话库设置</summary><p class="field-help">可见性变更适用于所有历史版本。已经下载或 Fork 的内容无法撤回。</p><div class="draft-actions"><button id="change-visibility" class="button button-secondary">修改可见性</button><button id="purge-package" class="button button-danger-quiet">永久清理此库</button></div><p class="field-help">永久清理删除此库的版本、草稿与记录；其他库依赖的共享内容和独立备份保留。</p></details>
+          </div></div>
+          <aside class="repository-about" aria-label="仓库信息">
+            <section class="about-section"><h2>About</h2><p id="repository-about-description"></p><div id="repository-about-platforms" class="platform-badges"></div><dl id="repository-about-facts"></dl></section>
+            <section id="code-checkpoint-panel" class="about-section" tabindex="-1"><h2>关联代码</h2><div id="code-checkpoint-content"></div></section>
+            <section class="about-section"><h2>同步恢复</h2><p>在本机用 ctx 恢复同一检查点的对话与代码。</p><a class="text-button repository-help-link" href="/cli#code-checkpoints">查看检查点与恢复说明 →</a><details class="checkpoint-guide"><summary>终端操作示例</summary><p>在对话工作区保存当前对话与干净的代码提交：</p><pre>ctx checkpoint --code /path/to/code -m "记录当前实现"</pre><p>先登录并克隆页面所选版本，再用本机代码仓库恢复到新目录。请替换代码路径与 NEWDIR：</p><pre id="checkpoint-restore-command">ctx restore REF --code /path/to/code --to NEWDIR</pre><p>命令创建恢复副本。加上 <code>--codex</code> 可继续导入本机 Codex；多段对话时用 <code>--conversation ID</code> 选择一段。导入结果以本地回执为准。</p></details></section>
+          </aside></div>
         </section>
         <section id="contribution-view" class="view" hidden aria-labelledby="contribution-title">
           <button id="contribution-back" class="back-button">← 返回上游对话库</button>
@@ -80,7 +96,7 @@
         </section>
         <section id="loading-view" class="view"><div class="empty-state"><span class="loading-ring" aria-hidden="true"></span><h2>正在连接 ContextHub</h2><p>读取工作空间与服务配置…</p></div></section>
       </main>
-      <footer class="workspace-footer"><span>ContextHub</span><span>对话有出处 · 编辑有记录 · 迁移由你决定</span></footer>
+      <footer class="workspace-footer"><span>ContextHub</span><span id="boundary-note">正在读取服务配置…</span></footer>
     </div>
   </div>
   <dialog id="contribution-dialog" aria-labelledby="contribution-dialog-title"><form id="contribution-form" class="dialog-body"><button type="button" class="dialog-close" data-close="contribution-dialog" aria-label="关闭">×</button><span class="eyebrow">BRING YOUR CONTEXT BACK</span><h2 id="contribution-dialog-title">贡献给上游</h2><p id="contribution-proposal-route" class="subtle"></p><label class="field-label" for="contribution-title-input">标题</label><input id="contribution-title-input" class="text-input" maxlength="200" required placeholder="一句话说明这次改进"><label class="field-label" for="contribution-description-input">说明</label><textarea id="contribution-description-input" class="text-input" rows="5" maxlength="10000" placeholder="解决了什么问题，有哪些内容需要上游特别关注？"></textarea><p class="field-help">提案使用当前选中的固定版本。后续编辑 Fork 不会自动改变这份提案；上游查看合并候选后才能发布。</p><p id="contribution-form-error" class="inline-error" role="alert" hidden></p><button id="contribution-submit" type="submit" class="button button-primary full-width">提交贡献请求</button></form></dialog>
