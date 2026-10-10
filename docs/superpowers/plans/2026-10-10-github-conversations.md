@@ -4,7 +4,7 @@
 
 **依据：** [修订设计](../specs/2026-10-10-github-conversations.md)。此前的 `.context/` attach/read/ZIP 计划取消；已有 Git export/import 保留。
 
-**状态：** 首版实现已完成，完整验收结果见 [验证记录](../../verification/2026-10-10-vibe-coding.md)。开发位于隔离工作树，未更新生产服务。Windows 原生验收仍待执行。
+**状态：** 首版实现已完成，完整验收结果见 [验证记录](../../verification/2026-10-10-vibe-coding.md)。已归并到用户指定的唯一开发目录 `/ssd1/code/yqq/Git_for_ai`，该目录的公网服务已更新。后续不再另建开发工作树。Windows 原生验收仍待执行。
 
 ## 1. 对话仓库页面
 

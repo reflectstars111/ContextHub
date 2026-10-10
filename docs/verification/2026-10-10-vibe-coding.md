@@ -1,6 +1,14 @@
 # Vibe coding 检查点与仓库界面验收
 
-日期：2026-10-10（Asia/Shanghai）。开发版本：0.8.0。分支：`feature/github-conversations`。本次保存本地实现，没有更新公网服务或合并 main。
+日期：2026-10-10（Asia/Shanghai）。版本：0.8.0。功能提交：`e26133e`，最初位于 `feature/github-conversations`。随后按用户要求归并到唯一开发目录 `/ssd1/code/yqq/Git_for_ai`，当前分支为 `feature/vibe-coding`；该目录的公网服务已更新。没有合并 main 或推送本轮提交。
+
+## 开发目录归并与公网更新
+
+用户要求后续只在 `/ssd1/code/yqq/Git_for_ai` 开发，已写入根目录 `AGENTS.md`。此前工作树不再用于开发，验收材料复制到本目录 `.artifacts/v08-development-verification/`。
+
+2026-10-10 14:42（Asia/Shanghai）停止应用，完整备份原 `.context-data` 到 `.artifacts/backups/20261010-144203-before-v08-directory-sync/`，切换到已验收提交后启动应用。保留数据目录与服务/隧道配置。应用和隧道均为 active，应用 WorkingDirectory 为指定目录。
+
+公网 `/api/config` 返回 0.8.0；主页、`repository.js`、`repository.css`、CLI 校验文件均为 200，缓存状态 DYNAMIC、Cache-Control 为 no-store；匿名下载为 401。没有读取真实对话正文或写入验收账号。本目录下另外执行检查点 API、Hub 同步恢复、CLI 分发测试，共 6 项通过。证据：`.artifacts/v08-public-sync.json` 与 `.artifacts/v08-original-directory-tests.log`。
 
 ## 交付行为
 
