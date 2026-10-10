@@ -2,7 +2,7 @@
 
 日期：2026-10-10（Asia/Shanghai）。开发分支：`feature/platform-maturity`。
 
-本轮先将原工作目录同步至 `origin/main` 的 `ceda7f5`，再在独立工作区完成开发。用户选择先完成本地代码，稍后处理 GitHub 权限；本轮没有推送、运行远端 CI 或部署生产服务。公网安装链接仍以已部署版本为准。
+本轮先将原工作目录同步至 `origin/main` 的 `ceda7f5`，再在独立工作区完成开发。首次本地验收时，按用户选择先完成代码，未推送、运行远端 CI 或部署生产服务；本文的测试结果均为该次本地验收证据。后续使用本仓库独立登录，从 `feature/platform-maturity` 分支直接推送完整代码与工作流改动，远端 CI 状态以该分支的实际运行结果为准。公网安装链接仍以已部署版本为准。
 
 ## 已实现与验收范围
 
@@ -75,6 +75,6 @@ node scripts/verify_draft_races.js
 
 本轮 Linux 上运行 PowerShell 7.5.3 安装器核心测试；DPAPI、NT 句柄、原生 EXE、junction 和 PowerShell 5.1 等 Windows 专用项目跳过。Wine 9 对基线及新增 NT 简单名称重命名均报 WinError 161，未将 Wine 结果计作 Windows 通过，也未降低文件保护策略绕过它。
 
-取得仓库写权限后，可推送本分支并运行 `.github/workflows/cli-cross-platform.yml`：Ubuntu/Windows × Python 3.12/3.13/3.14。原生通过前保持预览；Windows 10、ARM64 仍需单独界定支持范围。
+`.github/workflows/cli-cross-platform.yml` 运行 Ubuntu/Windows × Python 3.12/3.13/3.14 全量回归，包含本轮新增的 Python 测试。工作流已接入 `scripts/verify_release.py` 的结构化平台结果与 Node 草稿竞态检查；之前缺少的工作流授权已通过仓库独立登录取得。原生通过前保持预览；Windows 10、ARM64 仍需单独界定支持范围。
 
 部署时需同时升级 Hub 和 CLI，停服务备份整个数据目录，再验证迁移和公开入口；本轮未执行部署。

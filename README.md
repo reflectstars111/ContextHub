@@ -6,7 +6,7 @@
 
 ## 在终端管理对话：ctx
 
-面向 Linux / 远程服务器 / VS Code 终端，同时提供 Windows 10/11 原生预览版（无需 WSL）。网站提供[单文件与 PowerShell 安装教程](https://contexthub.reflectstars.dev/cli)，只需 Python 3.12+，无需第三方 Python 包。已完成 Windows 11 本机的原生命令、DPAPI、文件锁和安装器验证，详见 [Windows 重构验证记录](docs/verification/2026-10-09-windows-cli-refactor.md)；本轮新增功能的远端 Windows CI 尚待执行。当前服务器账号只有仓库读取权限，按用户选择先完成本地代码，Windows 保持预览标记；Windows 10/ARM64 不借用 Windows 11 AMD64 的验收结论。
+面向 Linux / 远程服务器 / VS Code 终端，同时提供 Windows 10/11 原生预览版（无需 WSL）。网站提供[单文件与 PowerShell 安装教程](https://contexthub.reflectstars.dev/cli)，只需 Python 3.12+，无需第三方 Python 包。0.6.0 已完成 Windows 11 本机的原生命令、DPAPI、文件锁和安装器验证，详见 [Windows 重构验证记录](docs/verification/2026-10-09-windows-cli-refactor.md)。0.7.0 新增功能的原生 Windows 验收仍待完成，继续保留预览标记；Windows 10/ARM64 不借用 Windows 11 AMD64 的验收结论。
 
 ```bash
 ctx auth login --username alice
@@ -202,6 +202,7 @@ python3 scripts/verify_multiplatform_web.py
 
 ## 产品文档
 
-- [当前产品与架构设计](docs/superpowers/specs/2026-10-08-contexthub-conversations-design.md)
+- [0.7.0 实施范围与验收要求](docs/superpowers/specs/2026-10-10-platform-maturity.md)
+- [对话库早期产品与架构设计](docs/superpowers/specs/2026-10-08-contexthub-conversations-design.md)：历史设计，部分限制已在后续版本解决。
 - [Codex 导入导出核查](docs/research/2026-10-08-codex-portability.md)
 - [早期 Agent 构想](ContextHub_Git_for_AI_Agents_Idea.md)：历史记录，当前定位以对话库设计为准。
