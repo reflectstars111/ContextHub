@@ -167,7 +167,7 @@ def main(output=None):
             existing_before = projection(export_conversation(client, existing))
             client.request("thread/unsubscribe", {"threadId": existing})
             requests_before_import = set(target_captures.glob("*.json"))
-            receipt = import_conversation(client, downloaded, str(target_work))
+            receipt = import_conversation(client, downloaded, str(target_work), mode="context")
             target_id = receipt["thread_id"]
             assert receipt["injected"], receipt
             assert target_id not in {source_id, existing}, "Import did not create a unique new thread"

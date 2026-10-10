@@ -378,12 +378,28 @@ class HubClient:
         return self._request('GET', self._package_path(ident, '/download'), query={'version': version},
                              authenticated=True, json_response=False)
 
-    def upload(self, blob, visibility='private', message=None):
-        return self._request('POST', '/api/packages', body=blob, query={'visibility': visibility, 'message': message}, authenticated=True)
+    def upload(self, blob, visibility='private', message=None, new_library_key=None):
+        if new_library_key is not None:
+            # Older Hubs silently ignore unknown query parameters and dedupe by
+            # content, which could bind a new branch to its original repository.
+            # Negotiate before sending any conversation bytes or creating a lib.
+            try:
+                configuration = self.config()
+            except HubClientError as exc:
+                if exc.status not in (404, 405):
+                    raise
+                configuration = {}
+            capabilities = configuration.get('capabilities') if isinstance(configuration, dict) else None
+            if not isinstance(capabilities, dict) or capabilities.get('new_library_key') is not True:
+                raise HubClientError(None, 'Hub 未声明支持独立分支建库（new_library_key）；请先升级 Hub 至 0.7 或兼容版本。对话尚未上传。')
+        return self._request('POST', '/api/packages', body=blob,
+                             query={'visibility': visibility, 'message': message,
+                                    'new_library_key': new_library_key}, authenticated=True)
 
-    def push(self, ident, blob, base_version, message):
+    def push(self, ident, blob, base_version, message, expected_visibility=None):
         return self._request('POST', self._package_path(ident, '/push'), body=blob,
-                             query={'base_version': base_version, 'message': message}, authenticated=True)
+                             query={'base_version': base_version, 'message': message,
+                                    'expected_visibility': expected_visibility}, authenticated=True)
 
     def fork(self, ident, version, visibility='private'):
         return self._request('POST', self._package_path(ident, '/fork'),

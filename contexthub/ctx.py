@@ -21,7 +21,7 @@ from .cli_runtime import configure_output, quote_argument
 from .hub_client import HubClient, HubClientError, normalize_hub
 from .importers import import_upload
 from .package import MAX_ARCHIVE_BYTES, MAX_CONVERSATIONS, MAX_TOTAL_BYTES, build_package, read_package
-from .workspace import Workspace
+from .workspace import Workspace, MergeConflict
 
 
 DEFAULT_HUB = 'https://contexthub.reflectstars.dev'
@@ -59,7 +59,23 @@ def parser():
     command.add_argument('--staged', action='store_true', help='比较暂存区与上次提交')
     command = sub.add_parser('commit', help='保存暂存区为不可变的本地版本')
     command.add_argument('-m', '--message', required=True)
-    sub.add_parser('log', help='查看本地提交记录')
+    sub.add_parser('log', help='查看包括合并父关系的本地提交历史')
+    command = sub.add_parser('branch', help='列出分支，或创建独立的本地分支')
+    command.add_argument('name', nargs='?')
+    command.add_argument('ref', nargs='?', default='HEAD')
+    command = sub.add_parser('switch', help='切换分支；工作区必须没有未提交修改')
+    command.add_argument('name')
+    command.add_argument('-c', '--create', action='store_true')
+    command = sub.add_parser('merge', help='三方合并；冲突时保留双方和原工作文件')
+    command.add_argument('ref')
+    command.add_argument('-m', '--message')
+    command.add_argument('--resolved', action='store_true', help='将已检查、暂存的文件作为人工解决结果')
+    git = sub.add_parser('git', help='与本地普通 Git 仓库双向交换受管对话和历史').add_subparsers(dest='git_action', required=True)
+    command = git.add_parser('export', help='导出分支和提交到新的普通 Git 仓库')
+    command.add_argument('directory')
+    command = git.add_parser('import', help='导入普通 Git 仓库的 ContextHub 格式历史到新工作区')
+    command.add_argument('repository')
+    command.add_argument('directory')
     command = sub.add_parser('clone', help='下载仓库或网页分享链接为本地对话库（需要登录）')
     command.add_argument('repository')
     command.add_argument('directory', nargs='?')
@@ -74,7 +90,7 @@ def parser():
     command = sub.add_parser('push', help='按顺序推送本地提交；首次默认创建私有库')
     command.add_argument('--hub')
     command.add_argument('--visibility', choices=('private', 'public'))
-    sub.add_parser('pull', help='工作目录干净且无待推送提交时，拉取 Hub 最新版本')
+    sub.add_parser('pull', help='拉取 Hub 最新版本；自动三方合并已提交的独立修改')
     sub.add_parser('remote', help='显示当前绑定的 Hub 仓库')
     command = sub.add_parser('export', help='导出已提交版本，可供 contexthub import 使用')
     command.add_argument('output')
@@ -125,8 +141,6 @@ def _require_user(client):
 def _clean(status, *, pull=False):
     if status.get('modified') or status.get('staged'):
         raise ValueError('工作目录有未提交修改；请先检查 ctx diff、ctx add . 和 ctx commit -m "说明"')
-    if pull and status['ahead']:
-        raise ValueError('本地有待推送提交，pull 不会覆盖它们；请先推送，若已分叉可另行 clone 最新版本后整理修改')
 
 
 def _remote_result(origin, detail, blob, local_commit=None):
@@ -234,11 +248,18 @@ def _push(ws, args):
         pushed = 0
         for commit in pending:
             blob = ws.package_bytes(commit['id'])
+            if remote is not None and blob == ws.package_bytes(remote['local_commit']):
+                # A topology-only merge has no new Hub snapshot to upload.
+                ws.mark_pushed(dict(remote, local_commit=commit['id']), expected_head=original_head)
+                remote = ws.remote
+                continue
             if remote is None:
-                detail = client.upload(blob, visibility=args.visibility or 'private', message=commit['message'])
+                detail = client.upload(blob, visibility=args.visibility or 'private', message=commit['message'],
+                                       new_library_key=ws.upload_key())
             else:
                 try:
-                    detail = client.push(remote['package_id'], blob, base_version=remote['version_id'], message=commit['message'])
+                    detail = client.push(remote['package_id'], blob, base_version=remote['version_id'],
+                                         message=commit['message'], expected_visibility=remote['visibility'])
                 except HubClientError as exc:
                     if exc.status == 404:
                         raise HubClientError(404, str(exc) + '；只有仓库所有者可以推送。请确认登录账号，或用 ctx fork 将对话库复制到自己名下。') from exc
@@ -246,6 +267,8 @@ def _push(ws, args):
             updated = _remote_result(origin, detail, blob, commit['id'])
             if remote and updated['package_id'] != remote['package_id']:
                 raise ValueError('Hub 返回了不同的仓库；本地同步记录未更新')
+            if remote and updated['visibility'] != remote['visibility']:
+                raise ValueError('对话库可见性在推送期间发生变化；请核对网页设置，再 ctx pull 确认，本地同步记录未更新')
             ws.mark_pushed(updated, expected_head=original_head)
             remote = ws.remote
             pushed += 1
@@ -264,14 +287,21 @@ def _pull(ws):
         detail = client.detail(remote['package_id'])
         selected = _selected_version(detail)
         if selected == remote['version_id']:
-            return {'updated': False, 'remote': remote}
+            if detail.get('id') != remote['package_id'] or detail.get('visibility') not in ('private', 'public'):
+                raise ValueError('Hub 返回了无效的仓库可见性信息；本地同步记录未更新')
+            changed = detail['visibility'] != remote['visibility']
+            if changed:
+                # Pull is the explicit metadata-refresh boundary. Push always
+                # uses the visibility recorded before the attempted upload.
+                ws.mark_pushed(dict(remote, visibility=detail['visibility']), expected_head=ws.head)
+            return {'updated': False, 'visibility_updated': changed, 'remote': ws.remote}
         head = ws.head
         blob = client.download(remote['package_id'], selected)
         read_package(blob)
         updated = _remote_result(client.origin, detail, blob)
         if updated['package_id'] != remote['package_id']:
             raise ValueError('Hub 返回了不同的仓库；本地内容未更新')
-        ws.checkout_remote(blob, updated, expected_head=head)
+        ws.integrate_remote(blob, updated, expected_head=head)
         return {'updated': True, 'remote': ws.remote, 'status': ws.status()}
 
 
@@ -303,7 +333,19 @@ def run(args):
         return {'directory': str(ws.root), 'status': ws.status()}
     if args.action in ('clone', 'fork'):
         return _clone(args)
+    if args.action == 'git' and args.git_action == 'import':
+        from .git_bridge import import_git
+        return import_git(args.repository, args.directory)
     ws = Workspace.find(Path.cwd())
+    if args.action == 'git':
+        from .git_bridge import export_git
+        return export_git(ws, args.directory)
+    if args.action == 'branch':
+        return {'branches': ws.branch(args.name, args.ref) if args.name else ws.branches()}
+    if args.action == 'switch':
+        return {'status': ws.switch(args.name, args.create)}
+    if args.action == 'merge':
+        return ws.merge(args.ref, args.message, args.resolved)
     if args.action == 'add':
         if args.files == ['.']:
             ws.stage()
@@ -342,6 +384,7 @@ def _safe(value):
 
 
 def _print_status(value):
+    print(_safe(f"分支：{value.get('branch', 'main')}"))
     print(f"提交：{(value.get('head') or '尚无提交')[:16]}；对话：{value['conversations']}；待推送：{value['ahead']}")
     print(f"暂存修改：{'有' if value['staged'] else '无'}；未暂存修改：{'有' if value['modified'] else '无'}")
     if value.get('error'):
@@ -365,7 +408,7 @@ def _display(args, value):
             print(_safe(f'提示：{warning}'))
         if value['import_report']['requires_confirmation']:
             print('接受这些提示后，可在 ctx add 时添加 --confirm-import。')
-    elif args.action in ('status', 'init', 'add', 'clone', 'fork'):
+    elif args.action in ('status', 'init', 'add', 'clone', 'fork', 'switch'):
         if 'directory' in value:
             print(_safe(f"本地对话库：{value['directory']}"))
         for item in value.get('imports', []):
@@ -373,6 +416,14 @@ def _display(args, value):
             for warning in item['import_report'].get('warnings', []):
                 print(_safe(f'导入提示：{warning}'))
         _print_status(value.get('status', value))
+    elif args.action == 'branch':
+        for branch in value['branches']:
+            print(_safe(f"{'*' if branch['current'] else ' '} {branch['name']}  {(branch['head'] or '')[:12]}"))
+    elif args.action == 'merge':
+        print('已合并' if value['merged'] else '已包含目标分支')
+        _print_status(value['status'])
+    elif args.action == 'git':
+        print(_safe(json.dumps(value, ensure_ascii=False, indent=2)))
     elif args.action == 'commit':
         print(_safe(f"已提交 {value['id'][:12]}  {value['message']}"))
     elif args.action == 'log':
@@ -402,7 +453,8 @@ def _display(args, value):
         if args.action == 'push':
             print(f"已推送 {value['pushed']} 个提交" if value['pushed'] else '没有待推送提交')
         elif args.action == 'pull':
-            print('已拉取最新版本' if value['updated'] else '已是最新版本')
+            print('已拉取最新版本' if value['updated'] else
+                  '已更新远程可见性记录，请检查后再推送' if value.get('visibility_updated') else '已是最新版本')
         remote = value.get('remote')
         print(_safe(f"{remote['url']}/?package={remote['package_id']}\n远程版本：{remote['version_id']}（{remote['visibility']}）" if remote else '尚未绑定远程仓库'))
 
@@ -431,11 +483,16 @@ def main(argv=None):
         if status == 401 and 'ctx auth login' not in message:
             message += '\n登录已失效或尚未登录，请使用 ctx auth login --hub 目标站点 --username 用户名'
         if status == 409:
-            message += '\n远程版本已更新；本地内容保留，请在新目录 clone 最新版本后整理修改。'
+            message += ('\n请先在网页核对公开/私有设置，再 ctx pull 更新记录，确认后重新 push。'
+                        if '可见性' in message else
+                        '\n远程版本已更新；本地内容保留，请使用 ctx pull 合并后重新 push。')
         if as_json:
-            print(json.dumps({'error': message, **({'status': status} if status else {})}, ensure_ascii=False), file=sys.stderr)
+            print(json.dumps({'error': message, **({'status': status} if status else {}),
+                              **({'merge': exc.details} if isinstance(exc, MergeConflict) else {})}, ensure_ascii=False), file=sys.stderr)
         else:
             print('错误：' + _safe(message), file=sys.stderr)
+            if isinstance(exc, MergeConflict):
+                print(_safe(json.dumps(exc.details, ensure_ascii=False, indent=2)), file=sys.stderr)
         return 1
 
 

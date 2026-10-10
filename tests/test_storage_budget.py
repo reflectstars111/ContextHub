@@ -59,11 +59,12 @@ class StorageBudgetTests(unittest.TestCase):
         proposal = contributions.create(source['id'], bob, source['version']['id'], 'Improve')
         return contributions, target, proposal
 
-    def test_unlimited_mode_needs_no_lock_and_budget_uses_native_lock(self):
-        with patch('contexthub.storage_budget.safe_fs.lock', side_effect=AssertionError('unlimited mode needs no lock')):
+    def test_unlimited_and_budget_modes_share_native_cleanup_lock(self):
+        with patch('contexthub.storage_budget.safe_fs.lock', wraps=__import__('contexthub.safe_fs', fromlist=['lock']).lock) as locking:
             store = Store(self.root)
             self.assertFalse(store.budget.enabled)
             self.assertEqual(store.list_packages(), [])
+            self.assertTrue(locking.called)
         store = Store(self.root, min_free_bytes=1)
         with store.budget.hold(), store.budget.hold():
             self.assertTrue(store.budget.enabled)

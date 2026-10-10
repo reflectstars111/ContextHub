@@ -13,11 +13,11 @@
       <p class="eyebrow">CONVERSATIONS, VERSIONED.</p>
       <h1>在终端里，<br>让对话持续演化。</h1>
       <p class="lead">用熟悉的 add、commit、push 和 pull，管理你的 AI 对话。<br>本地整理，提交留档，与 ContextHub 同步。</p>
-      <div class="actions"><a class="button" href="/ctx.pyz" download>下载 ctx · 0.6.0</a><a href="#windows">Windows 安装 ↓</a><a href="#install">Linux 安装 ↓</a></div>
+      <div class="actions"><a class="button" href="/ctx.pyz" download>下载 ctx · 0.7.0</a><a href="#windows">Windows 安装 ↓</a><a href="#install">Linux 安装 ↓</a></div>
       <p class="note">Windows 预览版 / Linux · Python 3.12+ · 运行时无第三方 Python 依赖 · MIT 开源</p>
     </section>
-    <div class="benefits"><article><span>01</span><h2>整理多种来源</h2><p>导入 Codex 对话包、Claude 和 DeepSeek 导出文件，在同一工作区管理。</p></article><article><span>02</span><h2>每次修改有记录</h2><p>先查看差异，再提交版本。提交保存在本机，运行 push 才会上传。</p></article><article><span>03</span><h2>跨机器继续整理</h2><p>克隆固定版本，拉取更新。发生分叉时停止同步，保留本地内容。</p></article></div>
-    <section id="windows"><p class="eyebrow">WINDOWS / POWERSHELL</p><h2>在 Windows 终端使用 ctx</h2><p>Windows 10 / 11 原生预览版，需要 Python 3.12+。适用于 PowerShell、CMD 和 VS Code 本地终端；无需 WSL。尚待真实 Windows CI 验收。</p>
+    <div class="benefits"><article><span>01</span><h2>整理多种来源</h2><p>导入 Codex 对话包、Claude 和 DeepSeek 导出文件，在同一工作区管理。</p></article><article><span>02</span><h2>每次修改有记录</h2><p>先查看差异，再提交版本。提交保存在本机，运行 push 才会上传。</p></article><article><span>03</span><h2>跨机器继续整理</h2><p>克隆固定版本，拉取更新。独立修改自动合并，冲突保留双方内容。</p></article></div>
+    <section id="windows"><p class="eyebrow">WINDOWS / POWERSHELL</p><h2>在 Windows 终端使用 ctx</h2><p>Windows 10 / 11 原生预览版，需要 Python 3.12+。适用于 PowerShell、CMD 和 VS Code 本地终端；无需 WSL。已同步 Windows 11 本机修复；本次新增功能的原生 Windows CI 待运行，仍保留预览标记。</p>
       <p>先检查 <code>py -3 --version</code>。下载安装脚本，查看内容后运行；安装到当前用户目录，不需要管理员权限。</p>
 <pre><code>Invoke-WebRequest https://contexthub.reflectstars.dev/install-ctx.ps1 -OutFile .\install-ctx.ps1
 Get-Content .\install-ctx.ps1
@@ -67,7 +67,7 @@ ctx push
 ctx clone 'https://contexthub.reflectstars.dev/?package=仓库ID' my-copy
 cd my-copy
 ctx pull</code></pre>
-      <p class="note">add . 只暂存受管的对话文件，不扫描项目。pull 要求本地干净且没有待推送提交；遇到双方都有新提交时，可另行 clone 最新版本后整理修改。首版不提供分支切换、自动合并或强制覆盖。clone 取得所选快照，log 记录此后本地的提交；网站可查看完整远程历史。</p>
+      <p class="note">add . 只暂存受管的对话文件，不扫描项目。pull 要求工作区干净；有本地和远端新提交时，独立修改会自动合并。冲突时保留双方快照并输出 incoming 分支，编辑后可显式解决。支持 branch、switch、merge，不支持强制覆盖。clone 取得所选快照，log 记录此后本地的提交；网站可查看完整远程历史。</p>
     </section>
     <section><h2>复用别人的对话</h2><p>公开库可匿名阅读，所有克隆、下载与写操作均须登录。修改别人的库时，先创建自己的 Fork。</p>
 <pre><code>ctx fork 'https://contexthub.reflectstars.dev/?package=仓库ID' my-fork
@@ -76,8 +76,14 @@ cd my-fork
 ctx remote
 ctx log
 ctx export ../shared.contextpack</code></pre>
-      <p class="note">Fork 默认私有，不改变原库。需要贡献回上游时，可创建公开 Fork，并在网站提交贡献请求。库的公开性创建后固定。</p>
+      <p class="note">Fork 默认私有，不改变原库。需要贡献回上游时，可创建公开 Fork，并在网站提交贡献请求。库拥有者可在网页设置中修改公开性，变更适用于全部历史版本。</p>
     </section>
+    <section><h2>分支、合并与普通 Git</h2><pre><code>ctx switch -c improve
+# 编辑、add、commit 后
+ctx switch main
+ctx merge improve
+ctx git export ../conversation-git
+ctx git import ../conversation-git ../restored-context</code></pre><p class="note">Git 导出/导入目录必须不存在。导出的仓库可用普通 git clone、push 管理；导入读取其已提交的受管对话与分支，不读取项目杂项。Hub 的 clone 仍下载所选快照。</p></section>
     <section><h2>连接本机 Codex</h2><p>安装 Codex CLI 后，可以直接使用 ctx 的本地桥接命令。Windows 优先识别 codex.exe 和常见 npm 安装；找不到时，可将 CONTEXTHUB_CODEX_EXE 设为本机 codex.exe 完整路径。</p>
 <pre><code>ctx codex list
 ctx codex export --thread 会话ID --title "项目讨论" -o codex.contextpack
@@ -86,7 +92,7 @@ ctx add codex.contextpack
 # 下载并导出包后，在自己的机器检查，再导入
 ctx codex import shared.contextpack --dry-run
 ctx codex import shared.contextpack --cwd /absolute/path/to/project</code></pre>
-      <p class="note">导入会新建上下文会话，不调用模型。不恢复原始 UI 时间线、附件、工具执行状态、权限或项目文件。Claude、DeepSeek 的原平台回导不在首版支持范围。</p>
+      <p class="note">默认在 Codex 0.153.4 中重建可继续的原生用户/助手文本时间线，并验证读回与 resume；其他版本可显式 --mode context 注入上下文。不调用模型，也不恢复原始回合时间、附件、工具状态或权限。Claude、DeepSeek 的原平台回导不在首版支持范围。</p>
     </section>
     <footer><p>更多选项：<code>ctx --help</code> · 脚本输出：<code>ctx --json status</code></p><p>自部署站点：登录和首次 push 使用 <code>--hub https://你的Hub</code>，或设置 <code>CONTEXTHUB_HUB</code>。</p><a href="/">回到 ContextHub →</a></footer>
   </main>
