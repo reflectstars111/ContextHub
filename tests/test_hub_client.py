@@ -91,6 +91,37 @@ class HubClientTests(unittest.TestCase):
         return {'cookie_name': 'ch_session', 'token': 's' * 43, 'csrf_token': 'c' * 43,
                 'user': {'id': 'uid', 'username': 'alice'}, 'expires_at': time.time() + 3600, **updates}
 
+    def test_branch_upload_requires_explicit_creation_capability_before_sending_body(self):
+        configurations = [
+            {'mode': 'hub', 'version': '0.6.0'},
+            {'capabilities': {'new_library_key': False}},
+            {'capabilities': {'new_library_key': 1}},
+            {'capabilities': ['new_library_key']},
+        ]
+        blob = build_package([{'id': 'synthetic', 'messages': []}], 'Private fixture')
+        for configuration in configurations:
+            with self.subTest(configuration=configuration):
+                peer = self.peer({'/api/config': (200, {}, configuration)})
+                self.credentials.set(peer.origin, self.record())
+                client = self.client.HubClient(peer.origin, self.credentials)
+                with self.assertRaises(self.client.HubClientError) as failure:
+                    client.upload(blob, new_library_key='a' * 32)
+                self.assertIn('升级 Hub', str(failure.exception))
+                self.assertEqual([(method, path, body) for method, path, headers, body in peer.requests],
+                                 [('GET', '/api/config', b'')])
+
+    def test_branch_upload_current_hub_advertises_and_enforces_distinct_keys(self):
+        server, client = self.real_hub()
+        client.login('alice', 'synthetic-password-123')
+        self.assertIs(client.config()['capabilities']['new_library_key'], True)
+        self.assertIs(client.config()['capabilities']['expected_visibility'], True)
+        blob = build_package([{'id': 'synthetic', 'messages': []}], 'Private fixture')
+        first = client.upload(blob, new_library_key='a' * 32)
+        second = client.upload(blob, new_library_key='b' * 32)
+        retry = client.upload(blob, new_library_key='a' * 32)
+        self.assertNotEqual(first['id'], second['id'])
+        self.assertEqual(first['id'], retry['id'])
+
     def test_origin_rejects_plaintext_remote_and_ambiguous_urls(self):
         for bad in ['http://example.com', 'http://localhost:8080', 'http://127.1',
                     'https://alice:pw@example.com', 'https://example.com/path',

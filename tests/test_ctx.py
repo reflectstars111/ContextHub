@@ -144,6 +144,73 @@ class CtxTests(unittest.TestCase):
         self.command('pull', cwd=beta, expected=1)
         self.assertEqual(files, {path: path.read_bytes() for path in files})
 
+    def test_pull_auto_merges_independent_commits_and_can_push_result(self):
+        alpha, remote = self.published()
+        beta = self.root / 'beta'
+        self.command('clone', remote['package_id'], beta)
+        self.edit(alpha, 'remote answer')
+        self.command('push', cwd=alpha)
+        path = next((beta / 'conversations').glob('*.json'))
+        conversation = json.loads(path.read_text())
+        conversation['messages'][0]['content'] = 'local question'
+        path.write_text(json.dumps(conversation))
+        self.command('add', '.', cwd=beta)
+        self.command('commit', '-m', 'local question', cwd=beta)
+        self.assertTrue(self.command('pull', cwd=beta)['updated'])
+        self.assertEqual(self.command('status', cwd=beta)['ahead'], 1)
+        self.assertEqual(self.command('push', cwd=beta)['pushed'], 1)
+        self.command('pull', cwd=alpha)
+        messages = read_package(Workspace.find(alpha).package_bytes())['conversations'][0]['messages']
+        self.assertEqual([item['content'] for item in messages], ['local question', 'remote answer'])
+
+    def test_merge_keeps_local_choice_and_topology_only_push_skips_remote_version(self):
+        alpha, remote = self.published()
+        self.command('branch', 'feature', cwd=alpha)
+        self.command('switch', 'feature', cwd=alpha)
+        self.edit(alpha, 'feature change')
+        self.command('switch', 'main', cwd=alpha)
+        # Explicit resolution may keep the existing staged snapshot unchanged.
+        self.command('merge', 'feature', '--resolved', cwd=alpha)
+        result = self.command('push', cwd=alpha)
+        self.assertEqual(result['pushed'], 0)
+        self.assertEqual(self.command('status', cwd=alpha)['ahead'], 0)
+        self.assertEqual(HubClient(self.hub).detail(remote['package_id'])['version_count'], 1)
+
+    def test_changed_remote_visibility_blocks_push_until_explicit_pull(self):
+        directory, remote = self.published()
+        self.edit(directory, 'private pending conversation edit')
+        ws = Workspace(directory)
+        before = ws.package_bytes()
+        client = HubClient(self.hub)
+        owner = client.session()['user']
+        self.server.store.set_visibility(remote['package_id'], owner['id'], 'public', remote['version_id'])
+        failure = self.command('push', cwd=directory, expected=1)
+        self.assertEqual(failure['status'], 409)
+        self.assertIn('可见性', failure['error'])
+        self.assertEqual(ws.remote['visibility'], 'private')
+        self.assertEqual(ws.package_bytes(), before)
+        self.assertEqual(ws.status()['ahead'], 1)
+        self.assertEqual(client.detail(remote['package_id'])['version_count'], 1)
+        refreshed = self.command('pull', cwd=directory)
+        self.assertTrue(refreshed['visibility_updated'])
+        self.assertEqual(refreshed['remote']['visibility'], 'public')
+        self.assertEqual(self.command('push', cwd=directory)['pushed'], 1)
+        self.assertEqual(ws.package_bytes(), before)
+
+    def test_new_branch_push_creates_independent_library_even_for_identical_snapshot(self):
+        directory, original = self.published()
+        client = HubClient(self.hub)
+        original_blob = client.download(original['package_id'])
+        self.command('switch', '-c', 'feature', cwd=directory)
+        independent = self.command('push', cwd=directory)['remote']
+        self.assertNotEqual(independent['package_id'], original['package_id'])
+        self.edit(directory, 'feature evolves separately')
+        self.command('push', cwd=directory)
+        self.assertEqual(client.download(original['package_id']), original_blob)
+        self.command('switch', 'main', cwd=directory)
+        self.assertEqual(Workspace(directory).remote['package_id'], original['package_id'])
+        self.assertEqual(Workspace(directory).package_bytes(), original_blob)
+
     def test_push_resume_after_lost_response_does_not_duplicate_versions(self):
         directory, remote = self.published()
         self.edit(directory, 'Local second version')

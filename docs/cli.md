@@ -1,6 +1,6 @@
 # ctx：ContextHub 的终端工具
 
-适用 **Linux / 远程服务器 / VS Code 终端**，0.6.0 新增 **Windows 10/11 原生预览版**，需要 Python 3.12+，无需 WSL。管理对话不需要模型服务或第三方 Python 库；本地 Codex 桥接另需安装 Codex CLI。Windows 11 本机已验证全部 `ctx` 命令、内核路径、DPAPI、锁与安装器，详见[重构验证记录](verification/2026-10-09-windows-cli-refactor.md)。远端 Windows CI 尚待运行，因此保留预览标记。
+适用 **Linux / 远程服务器 / VS Code 终端**，当前 0.7.0 提供 **Windows 10/11 原生预览版**，需要 Python 3.12+，无需 WSL。管理对话不需要模型服务或第三方 Python 库；本地 Codex 桥接另需安装 Codex CLI。Windows 11 本机已验证全部 `ctx` 命令、内核路径、DPAPI、锁与安装器，详见[重构验证记录](verification/2026-10-09-windows-cli-refactor.md)。0.7.0 新增功能的原生 Windows CI 尚待运行，因此保留预览标记。
 
 ## 安装
 
@@ -139,13 +139,43 @@ ctx pull
 
 也可 `ctx clone PACKAGE_ID --hub https://hub.example.com`；支持分享链接中的固定 `version` 或 `--version VERSION_ID`。目标必须为空或不存在。clone 下载所选快照作为本地起点，不复制全部远程历史；网站仍可查看、比较和下载全部历史版本。`ctx log` 展示本地提交及拉取记录。
 
-首次 push 按最旧到最新顺序发布所有本地提交，提交说明保留；每个成功响应后保存同步位置，失败不会丢弃未推送提交。相同账号、内容与公开性的首次上传可能复用已有库，其原提交说明保留。已绑定库的公开性固定，不能用 push 改为公开或私有，也不能静默切换站点。
+首次 push 按最旧到最新顺序发布所有本地提交，提交说明保留；每个成功响应后保存同步位置，失败不会丢弃未推送提交。每个本地分支使用持久的新建标识创建独立库，即使内容相同也不会绑定其他库；响应丢失后重试仍指向同一库。此功能需要支持该能力的 0.7.0 或更新 Hub，旧 Hub 会在上传前被拒绝，请同步升级服务端和 CLI。库公开性可在网页设置中修改；push 不更改可见性，并检查已绑定的可见性是否一致。若网页改变了公开性，push 会安全停止；检查当前可见性后显式 pull 更新绑定，再决定是否 push。发生过可见性变更的库会拒绝缺少此检查的旧客户端发布，请升级 ctx。
 
 上传、克隆、下载、Fork、发布与拉取均需登录；他人的私有库无法访问。复制网页分享链接不传递密码或令牌。推送前要求工作区干净，避免“以为未提交编辑也已上传”的误解。
 
-pull 要求工作区没有未提交编辑，也没有待推送提交。服务端以基准版本进行并发检查；如果网页或另一台机器已发布新版，陈旧 push 会失败，不覆盖远端。网络失败后可重试 push，同基准、内容与说明不会重复创建版本。
+pull 要求工作区没有未提交编辑。有待推送提交时，会按共同基准尝试三方合并独立变化。服务端以基准版本进行并发检查；如果网页或另一台机器已发布新版，陈旧 push 会失败，不覆盖远端。网络失败后可重试 push，同基准、内容与说明不会重复创建版本。
 
-遇到分叉时，现有目录和本地提交保留。先在新目录 clone 最新版本，比较并整理需要保留的修改，再 add / commit / push。首版不提供强制覆盖、分支切换、自动合并、rebase 或 reset；也不实现 Git wire protocol。它是使用 Git 式操作的对话管理客户端。
+遇到冲突时，现有工作区和提交保留，远端快照保存在输出中指定的 `incoming/...` 分支。比较双方后编辑受管 JSON，执行 `ctx add .` 和 `ctx merge incoming/实际分支名 --resolved`，明确提交自己的解决结果；也可放弃解决，保留两条分支继续整理。不会静默选边或覆盖远端。
+
+## 分支与三方合并
+
+```bash
+ctx branch                    # 列出分支、HEAD 与绑定
+ctx switch -c improve         # 创建分支并切换
+# 编辑后 ctx add . && ctx commit -m '补充说明'
+ctx switch main
+ctx merge improve
+ctx log
+```
+
+分支共享不可变对象，各有独立 HEAD 和 Hub 绑定。新分支不继承原分支的远程库绑定，首次 push 会创建自己的库；切回原分支继续使用原绑定。切换要求没有未提交修改。旧版单分支工作区自动兼容迁移为 main。
+
+独立字段变化可合并；同字段不同修改、删除/编辑及不确定的顺序冲突要求人工解决。合并保存两个父提交，Hub 仍按线性公开版本接收当前分支快照，本地和 Git 导出保留完整分支 DAG。当前不提供 force、rebase、reset 或对象 GC。
+
+## 与普通 Git 仓库互通
+
+```bash
+ctx git export ../dialogues-git     # 目标目录必须不存在
+# dialogues-git 是普通 Git 仓库，可自行添加 remote 并 git push
+# 在另一台机器用普通 git clone 下载之后：
+ctx git import ../dialogues-git ../restored-dialogues
+cd ../restored-dialogues
+ctx branch
+```
+
+需要本机安装 Git。导出包含规范 JSON、快照和格式标记，保留本地分支及父子关系；不包含 Hub 凭据、绑定或项目杂项。Git 中直接编辑受管 JSON 并 commit 后，再导入会生成带审计记录的 ctx 版本；仅改 README 或空 Git 提交也可导入，push 跳过无内容变化的快照。
+
+导入只读取已提交的本地分支，不读取未提交工作树、执行 hooks、filters 或源仓库配置。它接收 ctx 导出格式，不盲目解释任意代码仓库。当前支持 SHA-1 Git 仓库、每个提交最多两个父节点、10,000 个提交和 512 MiB 快照总量；detached HEAD 先用 Git 创建或切换分支。导入目标必须不存在。原样往返保留 ctx 快照与 ID，普通 Git 编辑后再导出的 Git OID 可能变化。Hub 不直接提供 Git wire protocol HTTPS 服务。
 
 ## Fork 与复用
 
@@ -179,7 +209,9 @@ ctx codex import ../downloaded.contextpack --dry-run
 ctx codex import ../downloaded.contextpack --cwd /absolute/path/to/project
 ```
 
-Codex 桥接复用已有连接器实现：选择显式会话，不自动遍历上传历史；导入创建新上下文，不触发模型调用。它不恢复原始 UI 时间线、附件、工具状态、权限或项目文件。后续继续任务使用本机 Codex 配置，详见[迁移验证记录](verification/2026-10-09-transfer.md)。Claude/DeepSeek 当前可导入管理和导出可移植包，不承诺回导原平台继续聊天。
+Codex 默认 `--mode timeline` 在 **0.153.4** 重建新的原生用户/助手文本时间线，导入后检查公开 API 读回、独立进程持久化与 resume，不触发模型调用。保留可见正文与顺序，重新生成会话/消息 ID 和时间，不恢复原始回合边界、附件、工具状态或权限。此模式依赖特定本地日志结构，其他版本写入前安全拒绝；可显式 `ctx codex import file.contextpack --cwd 项目路径 --mode context` 使用兼容注入模式。不会悄悄从时间线模式降级为上下文模式。
+
+合成隔离验证记录见[Codex 原生文本时间线](research/2026-10-10-codex-native-timeline.md)。Claude/DeepSeek 当前可导入管理和导出可移植包，不承诺回导原平台继续聊天。
 
 Windows 会识别 PATH 中的 `codex.exe` 及常见 npm 安装目录中的原生程序，不通过 `codex.cmd` shell 启动。无法自动找到时，在 PowerShell 中设置 `$env:CONTEXTHUB_CODEX_EXE = 'C:\完整路径\codex.exe'`；不会下载或自动安装 Codex。本次仅验证原生程序定位、协议合成测试及 dry-run，未在真实 Windows 上读取会话或调用模型。
 

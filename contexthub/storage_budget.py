@@ -43,9 +43,8 @@ class StorageBudget:
 
     @contextmanager
     def hold(self):
-        if not self.enabled:
-            yield
-            return
+        # Cleanup and durable writes share this lock even without a quota.
+        # Otherwise an uncommitted snapshot could be collected during purge.
         with self._lock:
             depth = getattr(self._local, 'depth', 0)
             if depth:

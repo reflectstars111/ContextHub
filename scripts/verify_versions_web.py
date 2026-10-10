@@ -43,6 +43,8 @@ def preview(page, message):
 
 
 def save(page, number):
+    if page.locator('#save-version').inner_text() == '发布新版本':
+        page.once('dialog', lambda dialog: dialog.accept())
     page.locator('#save-version').click()
     expect(page.locator('#draft-panel')).not_to_be_visible()
     expect(page.locator('#version-description')).to_contain_text(f'v{number}')
@@ -139,6 +141,7 @@ def main():
 
             # Updating an existing library by importing a complete new package.
             bob.locator('#edit-package').click()
+            expect(bob.locator('#draft-panel')).to_be_visible()
             replacement = copy.deepcopy(CONVERSATION)
             replacement['messages'][0]['content'] = '替换包中的新内容，来源仍需核对。'
             candidate = root / 'candidate.contextpack'
@@ -161,10 +164,13 @@ def main():
             other.locator('#edit-package').click()
             edit_message(other, '第二标签页需要保留的草稿')
             preview(other, '第二标签页修改')
+            other.locator('#save-private-draft').click()
+            expect(other.locator('#draft-autosave-status')).to_contain_text('草稿已保存到服务器')
             bob.locator('#edit-package').click()
             edit_message(bob, '第一标签页已保存的内容')
             preview(bob, '第一标签页修改')
             save(bob, 4)
+            other.once('dialog', lambda dialog: dialog.accept())
             other.locator('#save-version').click()
             expect(other.locator('#draft-status')).to_contain_text('草稿已保留')
             expect(other.locator('#draft-panel')).to_be_visible()

@@ -29,7 +29,9 @@ jobs:
       - name: Check Git for temporary Hub integration tests
         run: git --version
       - name: Test all commands, native Windows behavior and Hub regressions
-        run: python -m unittest discover -v
+        run: python scripts/verify_release.py
+      - name: Verify draft save and account-change races
+        run: node scripts/verify_draft_races.js
       - name: Build CLI artifact
         run: python -m contexthub.distribution --output ctx.pyz
       - name: Run archive outside the checkout

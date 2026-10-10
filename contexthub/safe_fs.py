@@ -314,6 +314,28 @@ if os.name == 'nt':
         finally:
             _close_handle(handle)
 
+    def rename_dir(parent, source, target):
+        """Publish a sibling directory atomically, never replacing a target."""
+        source_path = parent.entry(source)
+        target_path = parent.entry(target)
+        handle, _ = _open_handle(source_path, _DELETE, _SHARE_READ | _SHARE_WRITE,
+                                 _OPEN_EXISTING, directory=True)
+        try:
+            encoded = _name(target).encode('utf-16-le')
+            buffer = ctypes.create_string_buffer(ctypes.sizeof(_RenameInfo) + len(encoded))
+            information = _RenameInfo.from_buffer(buffer)
+            information.replace = 0
+            information.root = None
+            information.length = len(encoded)
+            ctypes.memmove(ctypes.addressof(buffer) + _RenameInfo.name.offset, encoded, len(encoded))
+            status = _IOStatus()
+            result = _rename_file(handle, ctypes.byref(status), buffer, len(buffer), 10)
+            if result < 0:
+                ctypes.set_last_error(_dos_error(result))
+                raise _error(target_path)
+        finally:
+            _close_handle(handle)
+
     def sync_dir(parent):
         # Windows has no supported directory fsync equivalent. All payloads
         # are FlushFileBuffers'd via os.fsync before an atomic rename.
@@ -379,6 +401,24 @@ else:
 
     def replace(parent, source, target):
         os.replace(_name(source), _name(target), src_dir_fd=parent, dst_dir_fd=parent)
+
+    def rename_dir(parent, source, target):
+        """Linux renameat2 NOREPLACE closes the target-existence race."""
+        import ctypes
+        source, target = _name(source), _name(target)
+        information = stat_entry(parent, source)
+        if not stat.S_ISDIR(information.st_mode):
+            raise UnsafePathError('仅可重命名普通目录')
+        libc = ctypes.CDLL(None, use_errno=True)
+        rename = getattr(libc, 'renameat2', None)
+        if rename is None:
+            raise UnsafePathError('系统缺少安全目录重命名支持（需要 Linux renameat2）')
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        if rename(parent, os.fsencode(source), parent, os.fsencode(target), 1):
+            number = ctypes.get_errno()
+            raise OSError(number, os.strerror(number), target)
+        sync_dir(parent)
 
     def sync_dir(parent):
         os.fsync(parent)

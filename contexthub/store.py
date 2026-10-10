@@ -20,13 +20,14 @@ from pathlib import Path
 from .package import read_package
 from .platforms import PLATFORMS, normalize_platform, package_platforms
 from .storage_budget import BudgetConnection, StorageBudget, StoreCapacityError
+from .library_state import LibraryState
 
 
 class StoreConflict(ValueError):
     """The library changed since the caller loaded its expected base."""
 
 
-class Store:
+class Store(LibraryState):
     def __init__(self, root, max_storage_bytes=None, min_free_bytes=0):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -53,6 +54,7 @@ class Store:
             ''')
         self._migrate_versions()
         self._migrate_platforms()
+        self._migrate_library_state()
         self._repair_refs()
 
     def _migrate_versions(self):
@@ -127,6 +129,8 @@ class Store:
                 # Bound dirty pages not yet visible to directory accounting.
                 sqlite3.Connection.execute(conn, 'PRAGMA cache_size=-256')
             conn.row_factory = sqlite3.Row
+            # Purged message/search/draft text must not remain in freed pages.
+            sqlite3.Connection.execute(conn, 'PRAGMA secure_delete=ON')
             try:
                 yield conn
                 conn.commit()
@@ -242,14 +246,19 @@ class Store:
                 row = db.execute("SELECT git_commit FROM packages WHERE id=? AND visibility='public' AND deleted=0", (ident,)).fetchone()
                 if row and row['git_commit']:
                     self._git('update-ref', f'refs/heads/packages/{ident}', row['git_commit'])
+                elif (self.root / 'public.git').exists():
+                    self._remove_git_ref(ident)
         except (OSError, subprocess.CalledProcessError, StoreCapacityError):
             logging.getLogger(__name__).warning('Public Git ref refresh deferred until next startup')
 
     def _repair_refs(self):
         with self.db() as db:
-            rows = db.execute("SELECT id FROM packages WHERE visibility='public' AND deleted=0 AND git_commit IS NOT NULL").fetchall()
-        for row in rows:
-            self._sync_git_ref(row['id'])
+            identifiers = {row['id'] for row in db.execute("SELECT id FROM packages WHERE visibility='public' AND deleted=0 AND git_commit IS NOT NULL")}
+        if (self.root / 'public.git').exists():
+            identifiers.update(ref.removeprefix('refs/heads/packages/') for ref in
+                               self._git('for-each-ref', '--format=%(refname)', 'refs/heads/packages/').splitlines())
+        for ident in identifiers:
+            self._sync_git_ref(ident)
 
     def _save_blob(self, data):
         digest = hashlib.sha256(data).hexdigest()
@@ -301,33 +310,66 @@ class Store:
         self._index_platforms(db, ident, package)
         return ident, version_id
 
-    def add_package(self, owner, data, visibility='private', message=None):
+    def add_package(self, owner, data, visibility='private', message=None, new_library_key=None):
         if visibility not in ('private', 'public'):
             raise ValueError('visibility 必须为 private 或 public')
+        if new_library_key is not None and (not isinstance(new_library_key, str)
+                or not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', new_library_key)):
+            raise ValueError('new_library_key 需要 32–128 个字母、数字、下划线或连字符')
         if message is not None:
             if not isinstance(message, str) or not 1 <= len(message.strip()) <= 2000:
                 raise ValueError('请填写 1–2000 个字符的版本说明')
             message = message.strip()
         package = read_package(data)
         digest = hashlib.sha256(data).hexdigest()
+        key_hash = hashlib.sha256(new_library_key.encode()).hexdigest() if new_library_key else None
+        version_id = None
         with self.lock:
             with self.db() as db:
                 db.execute('BEGIN IMMEDIATE')
-                duplicate = db.execute('SELECT id FROM packages WHERE owner_id=? AND sha256=? AND visibility=? AND deleted=0', (owner['id'], digest, visibility)).fetchone()
-                if duplicate:
-                    ident = duplicate['id']
+                if key_hash is not None:
+                    request = db.execute('SELECT * FROM package_create_requests WHERE owner_id=? AND key_hash=?',
+                                         (owner['id'], key_hash)).fetchone()
+                    if request:
+                        existing = db.execute('SELECT visibility,deleted FROM packages WHERE id=?',
+                                              (request['package_id'],)).fetchone()
+                        if existing is None or existing['deleted']:
+                            raise StoreConflict('创建请求对应的对话库已删除；请使用新的创建标识，避免意外恢复')
+                        if request['sha256'] != digest or request['visibility'] != visibility:
+                            raise StoreConflict('同一创建标识不能用于不同的内容或可见性')
+                        if existing['visibility'] != visibility:
+                            raise StoreConflict('创建请求对应库的可见性已变化，请先确认后重新操作')
+                        ident, version_id = request['package_id'], request['version_id']
+                    else:
+                        ident, version_id = self._create_package(db, owner, data, package, visibility, message=message)
+                        db.execute('INSERT INTO package_create_requests VALUES (?,?,?,?,?,?)',
+                                   (owner['id'], key_hash, ident, version_id, digest, visibility))
                 else:
-                    ident, _ = self._create_package(db, owner, data, package, visibility, message=message)
+                    duplicate = db.execute('SELECT id FROM packages WHERE owner_id=? AND sha256=? AND visibility=? AND deleted=0', (owner['id'], digest, visibility)).fetchone()
+                    if duplicate:
+                        ident = duplicate['id']
+                    else:
+                        ident, _ = self._create_package(db, owner, data, package, visibility, message=message)
         if visibility == 'public':
             self._sync_git_ref(ident)
-        return self.detail(ident, owner['id'])
+        return self.detail(ident, owner['id'], version_id)
 
-    def add_version(self, ident, owner, data, base_version, message):
+    def add_version(self, ident, owner, data, base_version, message, draft_revision=None,
+                    expected_visibility=None):
+        if draft_revision is not None:
+            self._expected_revision(draft_revision)
         with self.lock, self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._package_row(db, ident, owner['id'])
             if row['owner_id'] != owner['id']:
                 raise FileNotFoundError('对话库不存在或无权操作')
+            if expected_visibility is None:
+                if row['visibility_revision']:
+                    raise StoreConflict('对话库可见性曾被修改，请刷新页面或升级 ctx 后确认可见性再发布')
+            elif expected_visibility not in ('public', 'private'):
+                raise ValueError('expected_visibility 必须为 private 或 public')
+            elif expected_visibility != row['visibility']:
+                raise StoreConflict('对话库可见性已变化，请保留草稿并刷新确认后再发布')
             if not isinstance(message, str) or not message.strip() or len(message) > 2000:
                 raise ValueError('请填写 1–2000 个字符的版本说明')
             if not isinstance(base_version, str) or not base_version:
@@ -360,6 +402,7 @@ class Store:
                 if changed != 1:
                     raise StoreConflict('对话库已有新版本，请刷新后比较并重新保存')
                 self._index_platforms(db, ident, package)
+            self._consume_draft(db, ident, draft_revision)
         if row['visibility'] == 'public':
             self._sync_git_ref(ident)
         return self.detail(ident, owner['id'], version_id)
@@ -375,6 +418,8 @@ class Store:
             version = self._version_row(db, ident, version_id)
             data = (self.blobs / (version['sha256'] + '.contextpack')).read_bytes()
             new_id, new_version = self._create_package(db, owner, data, read_package(data), visibility, version)
+            if source['visibility'] == 'private' or source['private_origin']:
+                db.execute('UPDATE packages SET private_origin=1 WHERE id=?', (new_id,))
         if visibility == 'public':
             self._sync_git_ref(new_id)
         return self.detail(new_id, owner['id'], new_version)
@@ -466,6 +511,9 @@ class Store:
 
     def delete(self, ident, user_id):
         with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._owned(db, ident, user_id)
+            self._remove_git_ref(ident)
             changed = db.execute('UPDATE packages SET deleted=1 WHERE id=? AND owner_id=? AND deleted=0', (ident, user_id)).rowcount
             if not changed:
                 raise FileNotFoundError('对话库不存在或无权操作')
