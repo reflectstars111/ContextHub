@@ -1,6 +1,6 @@
 # ContextHub：Git for AI Agents 产品构想
 
-> 历史构想：当前产品已明确为 **GitHub for AI Conversations**，以对话库保存、导入导出、分享、Fork 和版本协作为核心。最新实现为 0.3.0，见 [README](README.md)、[当前产品设计](docs/superpowers/specs/2026-10-08-contexthub-conversations-design.md)及[贡献协作验收](docs/verification/2026-10-09-contributions.md)。下文保留早期讨论，不代表当前开发范围。
+> 历史构想：当前产品已明确为 **GitHub for AI Conversations**，以对话库保存、导入导出、分享、Fork 和版本协作为核心。2026-10-10 进一步明确面向 **vibe coding**：把对话像代码一样管理，并关联代码版本以支持协调回退；当前开发版本 0.8.0 已实现固定提交关联及独立目录配对恢复，见 [README](README.md)、[最新定位与设计](docs/superpowers/specs/2026-10-10-github-conversations.md)及[本轮验收](docs/verification/2026-10-10-vibe-coding.md)。下文保留早期讨论，不代表当前开发范围。
 
 ## 1. 项目愿景
 

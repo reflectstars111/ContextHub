@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Run the checkout's ContextHub CLI without an installation step."""
+from contexthub.ctx import main
+
+if __name__ == '__main__':
+    raise SystemExit(main())

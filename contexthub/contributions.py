@@ -27,7 +27,8 @@ def _same_content(first, second):
     # Compression choices and ZIP timestamps do not constitute contributions.
     # Compare full canonical fields, including edit history and source claims.
     return (first['library'] == second['library']
-            and first['conversations'] == second['conversations'])
+            and first['conversations'] == second['conversations']
+            and first.get('code') == second.get('code'))
 
 
 def _text(value, label, maximum, *, required=False):

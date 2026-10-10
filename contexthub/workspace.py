@@ -61,6 +61,29 @@ def _hash(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def _source_identity(source):
+    if (not isinstance(source, dict)
+            or set(source) != {'provider', 'thread_id', 'conversation_id'}
+            or source['provider'] != 'codex'
+            or not isinstance(source['thread_id'], str)
+            or not source['thread_id'].strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in source['thread_id'])):
+        raise WorkspaceError('本地来源记录需要 Codex 原生会话 ID 和对应的规范对话 ID')
+    try:
+        raw = source['thread_id'].encode('utf-8')
+    except UnicodeEncodeError as exc:
+        raise WorkspaceError('Codex 原生会话 ID 包含无效字符') from exc
+    if len(raw) > 512 or source['conversation_id'] != 'sha256:' + _hash(raw):
+        raise WorkspaceError('Codex 原生会话 ID 过长或与规范对话 ID 不匹配')
+    return source['conversation_id']
+
+
+def _capture_digest(conversation):
+    value = copy.deepcopy(conversation)
+    value['source'].pop('exported_at', None)
+    return _hash(_json_bytes(value))
+
+
 def _filename(identifier):
     return 'conversations/' + _hash(identifier.encode('utf-8')) + '.json'
 
@@ -140,8 +163,12 @@ def _json(fd, name, limit=MAX_METADATA_BYTES):
         raise WorkspaceError(f'工作区 JSON 无效：{name}: {exc}') from exc
 
 
+def _file_limit(name):
+    return MAX_TOTAL_BYTES if name == "code.json" else MAX_CONVERSATION_BYTES
+
+
 def _check_snapshot(fd, name, expected):
-    data = _read(fd, name, MAX_CONVERSATION_BYTES, missing=True)
+    data = _read(fd, name, _file_limit(name), missing=True)
     if (_hash(data) if data is not None else None) != expected:
         raise _WorktreeChanged(f'文件在操作期间被其他程序修改，已取消并保留编辑：{name}')
 
@@ -157,7 +184,7 @@ def _revision_data(base_data, payload):
     # Valid downloaded packs may use different ZIP/JSON serialization. Keep
     # their exact bytes for an unchanged snapshot rather than staging a false
     # change just because our serializer chooses canonical whitespace.
-    if all(parsed[key] == base[key] for key in ('library', 'conversations', 'compatibility')):
+    if all(parsed.get(key) == base.get(key) for key in ('library', 'conversations', 'compatibility', 'code')):
         return base_data
     return result
 
@@ -187,7 +214,7 @@ class Workspace:
                 pass
             root = _directory(target)
             try:
-                for name in ('.contexthub', 'library.json', 'conversations'):
+                for name in ('.contexthub', 'library.json', 'conversations', 'code.json'):
                     try:
                         fs.stat_entry(root, name)
                     except FileNotFoundError:
@@ -282,17 +309,19 @@ class Workspace:
         required = {'schema_version', 'head', 'index', 'remote', 'managed', 'transaction'}
         if not isinstance(value, dict):
             raise WorkspaceError('工作区 state.json 无效')
-        if value.get('schema_version') == 1 and set(value) == required:
+        optional = {'sources'} if 'sources' in value else set()
+        if value.get('schema_version') == 1 and set(value) == required | optional:
             # Read old workspaces without touching their files. The next
             # successful mutation atomically publishes the migrated state.
             value.update(schema_version=2, branch='main',
                          branches={'main': {'head': value['head'], 'remote': copy.deepcopy(value['remote'])}})
-        if value.get('schema_version') == 2 and set(value) == required | {'branch', 'branches'}:
+        if value.get('schema_version') == 2 and set(value) == required | {'branch', 'branches'} | optional:
             value['upload_keys'] = {}
-        required |= {'branch', 'branches', 'upload_keys'}
+        value.setdefault('sources', {})
+        required |= {'branch', 'branches', 'upload_keys', 'sources'}
         if (set(value) != required or type(value['schema_version']) is not int or value['schema_version'] != 2
                 or not isinstance(value['managed'], list)
-                or len(value['managed']) > MAX_CONVERSATIONS + 1
+                or len(value['managed']) > MAX_CONVERSATIONS + 2
                 or any(not self._valid_path(path) for path in value['managed'])
                 or len(set(value['managed'])) != len(value['managed'])
                 or 'library.json' not in value['managed']):
@@ -318,6 +347,21 @@ class Workspace:
         if (not isinstance(value['branch'], str) or value['branch'] not in branches
                 or branches[value['branch']] != {'head': value['head'], 'remote': value['remote']}):
             raise WorkspaceError('当前分支与工作区指针不一致')
+        sources = value['sources']
+        if not isinstance(sources, dict) or set(sources) - set(branches):
+            raise WorkspaceError('本地来源跟踪的分支记录无效')
+        for bindings in sources.values():
+            if not isinstance(bindings, dict) or len(bindings) > MAX_CONVERSATIONS:
+                raise WorkspaceError('本地来源跟踪记录无效或数量超过限制')
+            for identifier, binding in bindings.items():
+                if (not isinstance(binding, dict)
+                        or set(binding) != {'provider', 'thread_id', 'capture_digest', 'workspace_digest'}):
+                    raise WorkspaceError('本地来源跟踪记录字段无效')
+                _source_identity({'provider': binding['provider'], 'thread_id': binding['thread_id'],
+                                  'conversation_id': identifier})
+                for key in ('capture_digest', 'workspace_digest'):
+                    if not isinstance(binding[key], str) or not _HASH.fullmatch(binding[key]):
+                        raise WorkspaceError('本地来源跟踪摘要无效')
         if value['transaction'] is not None and (
                 not isinstance(value['transaction'], str)
                 or not re.fullmatch(r'[0-9a-f]{32}', value['transaction'])):
@@ -326,12 +370,12 @@ class Workspace:
 
     @staticmethod
     def _valid_path(path):
-        return isinstance(path, str) and (path == 'library.json' or _FILE.fullmatch(path))
+        return isinstance(path, str) and (path in ('library.json', 'code.json') or _FILE.fullmatch(path))
 
     def _path(self, path):
         if not self._valid_path(path):
             raise WorkspaceError('不安全的工作树路径')
-        return (self._fds[0], path) if path == 'library.json' else (self._fds[2], path.split('/')[1])
+        return (self._fds[0], path) if path in ('library.json', 'code.json') else (self._fds[2], path.split('/')[1])
 
     @contextmanager
     def _subdir(self, name):
@@ -400,7 +444,10 @@ class Workspace:
 
     def _write_state(self, state):
         state['branches'][state['branch']] = {'head': state['head'], 'remote': copy.deepcopy(state['remote'])}
-        _atomic(self._fds[1], 'state.json', _json_bytes(state))
+        data = _json_bytes(state)
+        if len(data) > MAX_METADATA_BYTES:
+            raise WorkspaceError('工作区元数据超过大小限制')
+        _atomic(self._fds[1], 'state.json', data)
 
     def _cleanup_journal(self, journal):
         fs.unlink(self._fds[1], 'journal.json')
@@ -422,7 +469,7 @@ class Workspace:
         if (set(journal) != {'id', 'files'} or not isinstance(journal['id'], str)
                 or not re.fullmatch(r'[0-9a-f]{32}', journal['id'])
                 or not isinstance(journal['files'], list)
-                or len(journal['files']) > 2 * MAX_CONVERSATIONS + 1):
+                or len(journal['files']) > 2 * MAX_CONVERSATIONS + 2):
             raise WorkspaceError('恢复日志无效，请保留 .contexthub 并检查')
         seen = set()
         for entry in journal['files']:
@@ -441,8 +488,8 @@ class Workspace:
                 restored = []
                 for entry in journal['files']:
                     fd, name = self._path(entry['path'])
-                    current = _read(fd, name, MAX_CONVERSATION_BYTES, missing=True)
-                    data = (_read(backup_fd, entry['backup'], MAX_CONVERSATION_BYTES)
+                    current = _read(fd, name, _file_limit(name), missing=True)
+                    data = (_read(backup_fd, entry['backup'], _file_limit(name))
                             if entry['backup'] else None)
                     current_hash = _hash(current) if current is not None else None
                     before_hash = _hash(data) if data is not None else None
@@ -474,7 +521,7 @@ class Workspace:
         # Complete preflight and save original bytes before any working writes.
         for index, path in enumerate(paths):
             fd, name = self._path(path)
-            data = _read(fd, name, MAX_CONVERSATION_BYTES, missing=True)
+            data = _read(fd, name, _file_limit(name), missing=True)
             if (_hash(data) if data is not None else None) != expected.get(path):
                 raise _WorktreeChanged(f'文件在操作期间被其他程序修改，已取消并保留编辑：{path}')
             if data is not None and path not in previous['managed'] and not permit_existing:
@@ -518,6 +565,8 @@ class Workspace:
     def _files(package):
         result = {'library.json': _json_bytes(package['library'])}
         result.update({_filename(item['id']): _json_bytes(item) for item in package['conversations']})
+        if package.get('code') is not None:
+            result['code.json'] = _json_bytes(package['code'])
         return result
 
     def _work(self, *, snapshot=None, original=None):
@@ -526,13 +575,17 @@ class Workspace:
         library = _load_json(raw_library, 'library.json')
         if snapshot is not None:
             snapshot['library.json'] = _hash(raw_library)
-        if (set(library) != {'schema_version', 'title', 'description', 'source', 'conversation_ids'}
+        if (not isinstance(library, dict)
+                or set(library) - {'code_checkpoint'} != {'schema_version', 'title', 'description', 'source', 'conversation_ids'}
                 or library['schema_version'] != '0.1'
                 or not isinstance(library['conversation_ids'], list)
                 or len(library['conversation_ids']) > MAX_CONVERSATIONS
                 or any(not isinstance(item, str) for item in library['conversation_ids'])
                 or len(set(library['conversation_ids'])) != len(library['conversation_ids'])):
             raise WorkspaceError('library.json 的字段或 conversation_ids 无效')
+        if 'code_checkpoint' in library:
+            from .checkpoints import validate_checkpoint
+            validate_checkpoint(library['code_checkpoint'])
         conversations = []
         total = 0
         for identifier in library['conversation_ids']:
@@ -544,23 +597,28 @@ class Workspace:
             if total > MAX_TOTAL_BYTES:
                 raise WorkspaceError('工作树超过大小限制')
             item = _load_json(data, name)
-            if item.get('id') != identifier:
+            if not isinstance(item, dict) or item.get('id') != identifier:
                 raise WorkspaceError(f'对话 ID 与 library.json 不一致：{name}')
             conversations.append(item)
+        raw_code = _read(self._fds[0], 'code.json', MAX_TOTAL_BYTES, missing=True)
+        code = _load_json(raw_code, 'code.json') if raw_code is not None else None
+        if snapshot is not None:
+            snapshot['code.json'] = _hash(raw_code) if raw_code is not None else None
         if original is not None:
-            original.update(library=library, conversations=conversations)
+            original.update(library=library, conversations=conversations, code=code)
         if snapshot is not None:
             # A library edit can remove an ID. Capture those previously managed
             # files too, so an editor save cannot be erased by a later deletion.
             for path in state['managed']:
                 if path not in snapshot:
                     fd, name = self._path(path)
-                    data = _read(fd, name, MAX_CONVERSATION_BYTES, missing=True)
+                    data = _read(fd, name, _file_limit(name), missing=True)
                     snapshot[path] = _hash(data) if data is not None else None
         if not conversations:
             # Validate empty workspace metadata using the same bounded format.
             build_package([{'id': 'validation', 'messages': []}], library['title'],
-                          library['description'], source=library['source'])
+                          library['description'], source=library['source'],
+                          code_checkpoint=library.get('code_checkpoint'))
             return _empty_package(library), None
         if state['head']:
             base_data = self._object(self._commit_record(state['head'])['sha256'])
@@ -568,9 +626,11 @@ class Workspace:
             if library['source'] != base['library']['source']:
                 raise WorkspaceError('已有对话库的来源记录不可改写；可修改标题、说明和对话正文')
             data = _revision_data(base_data, {'title': library['title'], 'description': library['description'],
-                                              'conversations': conversations})
+                                              'conversations': conversations,
+                                              'code_checkpoint': library.get('code_checkpoint'), 'code': code})
         else:
-            data = build_package(conversations, library['title'], library['description'], source=library['source'])
+            data = build_package(conversations, library['title'], library['description'], source=library['source'],
+                                 code_checkpoint=library.get('code_checkpoint'), code=code)
         return read_package(data), data
 
     @property
@@ -602,38 +662,118 @@ class Workspace:
                 raise WorkspaceError('暂存区尚无对话')
             return self._object(digest)
 
-    def add(self, data, replace=False):
+    @staticmethod
+    def _source_list(state):
+        return [{'provider': binding['provider'], 'thread_id': binding['thread_id'],
+                 'conversation_id': identifier}
+                for identifier, binding in sorted(state['sources'].get(state['branch'], {}).items())]
+
+    def sources(self):
+        """Return this branch's local bindings, never the internal guard hashes."""
+        with self.locked():
+            return self._source_list(self._state())
+
+    def capture(self, data, sources, replace=False, *, code=_UNCHECKED):
+        """Atomically stage captured conversations and their local refresh guards."""
+        if not isinstance(sources, list) or not 1 <= len(sources) <= MAX_CONVERSATIONS:
+            raise WorkspaceError(f'采集需要 1–{MAX_CONVERSATIONS} 条本地来源记录')
+        bindings = {}
+        for source in sources:
+            identifier = _source_identity(source)
+            if identifier in bindings:
+                raise WorkspaceError('一次采集不能重复登记同一来源')
+            bindings[identifier] = copy.deepcopy(source)
+        return self._add(data, replace=replace, sources=bindings, code=code)
+
+    def add(self, data, replace=False, *, code=_UNCHECKED):
+        return self._add(data, replace=replace, code=code)
+
+    def _add(self, data, replace=False, *, sources=None, code=_UNCHECKED):
         incoming = read_package(data)
+        if sources is not None:
+            if set(sources) != {item['id'] for item in incoming['conversations']}:
+                raise WorkspaceError('每条本地来源必须对应采集包中的唯一对话，且不能遗漏对话')
+            for item in incoming['conversations']:
+                if item['source'].get('provider') != 'codex' or item['source'].get('thread_id') != item['id']:
+                    raise WorkspaceError('采集包中的 Codex 来源与规范对话 ID 不匹配')
         with self.locked():
             state = self._state()
             expected = {}
-            current, _ = self._work(snapshot=expected)
+            original = {}
+            current, _ = self._work(snapshot=expected, original=original)
             conversations = {item['id']: item for item in current['conversations']}
+            original_conversations = {item['id']: item for item in original['conversations']}
+            bindings = state['sources'].get(state['branch'], {})
+            captured = {}
             for item in incoming['conversations']:
-                previous = conversations.get(item['id'])
-                if previous is not None and previous != item and not replace:
-                    raise WorkspaceError(f'对话 ID 已存在且内容不同：{item["id"]}；检查后使用 --replace')
-                conversations[item['id']] = item
+                identifier = item['id']
+                previous = conversations.get(identifier)
+                binding = bindings.get(identifier) if sources is not None else None
+                if binding is not None:
+                    original_item = original_conversations.get(identifier)
+                    changed = (original_item is None
+                               or _hash(_json_bytes(original_item)) != binding['workspace_digest'])
+                    if changed and not replace:
+                        raise WorkspaceError(
+                            f'已跟踪的对话被修改或删除：{identifier}；先用 ctx add . --no-refresh 暂存人工修改，'
+                            '确认使用 Codex 内容覆盖后再添加 --replace')
+                    # Preserve the staged/audited representation when the source
+                    # has not changed; an export timestamp is not a new revision.
+                    unchanged = not changed and _capture_digest(item) == binding['capture_digest']
+                else:
+                    unchanged = False
+                    if previous is not None and previous != item and not replace:
+                        raise WorkspaceError(f'对话 ID 已存在且内容不同：{identifier}；检查后使用 --replace')
+                if sources is not None:
+                    captured[identifier] = _capture_digest(item)
+                if not unchanged:
+                    conversations[identifier] = item
             library = current['library']
+            checkpoint = library.get('code_checkpoint')
+            incoming_checkpoint = incoming['library'].get('code_checkpoint')
+            if incoming_checkpoint is not None:
+                if checkpoint is not None and checkpoint != incoming_checkpoint:
+                    raise WorkspaceError('导入内容关联了不同的代码检查点；请在新工作区导入，避免覆盖现有代码关联')
+                checkpoint = incoming_checkpoint
+            code = incoming.get('code', current.get('code')) if code is _UNCHECKED else code
+            if code and current.get('code'):
+                old_head = current['code']['head']
+                if old_head not in {snap['id'] for snap in code['snapshots']} and not replace:
+                    raise WorkspaceError('导入代码与现有快照历史不相连；请新建工作区，或确认后使用 --replace')
+            if code is not None:
+                from .code_repository import prune_bindings
+                code = prune_bindings(code, list(conversations.values()))
             if state['head']:
                 data = _revision_data(self.package_bytes(), {
                     'title': library['title'], 'description': library['description'],
-                    'conversations': list(conversations.values())})
+                    'conversations': list(conversations.values()), 'code_checkpoint': checkpoint, 'code': code})
             else:
                 data = build_package(list(conversations.values()), library['title'],
-                                     library['description'], source=library['source'])
+                                     library['description'], source=library['source'], code_checkpoint=checkpoint, code=code)
             package = read_package(data)
+            if sources is not None:
+                final = {item['id']: item for item in package['conversations']}
+                bindings = state['sources'].setdefault(state['branch'], {})
+                for identifier, source in sources.items():
+                    bindings[identifier] = {'provider': source['provider'], 'thread_id': source['thread_id'],
+                                            'capture_digest': captured[identifier],
+                                            'workspace_digest': _hash(_json_bytes(final[identifier]))}
+                if len(bindings) > MAX_CONVERSATIONS:
+                    raise WorkspaceError('本地来源跟踪数量超过限制')
             state['index'] = self._save_object(data)
             self._transition(state, self._files(package), expected=expected)
             return self.status()
 
-    def stage(self):
+    def stage(self, *, code=None):
         with self.locked():
             state = self._state()
             expected = {}
             package, data = self._work(snapshot=expected)
             if data is None:
                 raise WorkspaceError('不能暂存空对话库；至少保留一段对话')
+            if code is not None:
+                data = _revision_data(data, {'conversations': package['conversations'], 'code': code})
+                package = read_package(data)
             state['index'] = self._save_object(data)
             self._transition(state, self._files(package), expected=expected, permit_existing=True)
             return self.status()
@@ -648,6 +788,23 @@ class Workspace:
             record = self._save_commit(self._object(state['index']), message, state['head'])
             state['head'] = record['id']
             self._write_state(state)
+            return record
+
+    def record_code_checkpoint(self, checkpoint, message):
+        """Record a code link as a new immutable conversation commit.
+
+        The caller verifies a clean code checkout; this layer binds its claim to
+        the exact committed conversation snapshot and refuses pending edits.
+        """
+        from .checkpoints import attach_checkpoint
+        with self.locked():
+            expected = self._clean_snapshot()
+            state = self._state()
+            data = attach_checkpoint(self.package_bytes(), checkpoint)
+            package = read_package(data)
+            record = self._save_commit(data, message, state['head'])
+            state.update(head=record['id'], index=record['sha256'])
+            self._transition(state, self._files(package), expected=expected)
             return record
 
     def _resolve(self, ref, state=None):
@@ -677,6 +834,8 @@ class Workspace:
             # A new branch must not accidentally publish to its parent's Hub.
             state['branches'][name] = {'head': head, 'remote': None}
             state['upload_keys'][name] = uuid.uuid4().hex
+            if state['sources'].get(state['branch']):
+                state['sources'][name] = copy.deepcopy(state['sources'][state['branch']])
             self._write_state(state)
             return self.branches()
 
@@ -801,7 +960,7 @@ class Workspace:
                 # while recording this new snapshot against the applicable base.
                 revision_base = self.package_bytes(target_remote['local_commit'] if adopt_remote else ours)
                 package = read_package(data)
-                data = _revision_data(revision_base, dict(package['library'], conversations=package['conversations']))
+                data = _revision_data(revision_base, dict(package['library'], conversations=package['conversations'], code=package.get('code')))
                 record = self._save_commit(data, message or f'合并 {ref}', ours, merge_parent=theirs)
                 fast_forward = False
             state.update(head=record['id'], index=record['sha256'])
@@ -877,17 +1036,22 @@ class Workspace:
             base = self._commit_record(state['head'])['sha256'] if state['head'] else None
             result = {'branch': state['branch'], 'head': state['head'], 'staged': state['index'] != base,
                       'modified': False, 'remote': copy.deepcopy(state['remote']),
-                      'ahead': len(self.pending_commits()), 'conversations': 0}
+                      'ahead': len(self.pending_commits()), 'conversations': 0,
+                      'sources': self._source_list(state)}
             try:
                 original = {}
                 package, data = self._work(snapshot=_snapshot, original=original)
                 if state['index']:
                     indexed = read_package(self._object(state['index']))
-                    result['modified'] = any(original[key] != indexed[key]
-                                             for key in ('library', 'conversations'))
+                    result['modified'] = any(original.get(key) != indexed.get(key)
+                                             for key in ('library', 'conversations', 'code'))
                 else:
                     result['modified'] = bool(original['conversations'])
                 result['conversations'] = len(package['conversations'])
+                if package.get('code'):
+                    head = next(s for s in package['code']['snapshots'] if s['id'] == package['code']['head'])
+                    result['code'] = {'head': head['id'], 'files': len(head['files']),
+                                      'snapshots': len(package['code']['snapshots'])}
             except (WorkspaceError, PackageError) as exc:
                 result.update(modified=True, error=str(exc))
             return result

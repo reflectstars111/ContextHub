@@ -1,14 +1,15 @@
 """A bounded, inert, dependency-free portable conversation format.
 
-Only normalized text and explicit public metadata enter a contextpack. ZIPs
-are inspected in memory and never extracted. Hashes provide integrity, not
-authenticity. ``redact_conversations`` is a best-effort convenience detector;
-users must still review the selected text before publishing it.
+Normalized conversations and optional inert code snapshots enter a contextpack.
+ZIPs are inspected in memory and never extracted. Hashes provide integrity,
+not authenticity. ``redact_conversations`` applies to conversation text only;
+users must review selected conversations and source files before publishing.
 """
 
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import io
 import json
@@ -25,7 +26,7 @@ MAX_CONVERSATION_BYTES = 5 * 1024 * 1024
 MAX_TOTAL_BYTES = 100 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 110 * 1024 * 1024
 MAX_METADATA_BYTES = 1024 * 1024
-MAX_FILES = MAX_CONVERSATIONS * 2 + 3
+MAX_FILES = MAX_CONVERSATIONS * 2 + 3 + 10_001
 _ROLES = frozenset({"user", "assistant", "tool"})
 _SOURCE_KEYS = frozenset({
     "provider", "platform", "adapter", "kind", "version", "cli_version",
@@ -40,7 +41,7 @@ _PROVENANCE_KEYS = frozenset({
     "created_at", "type",
 })
 _ANNOTATION_KEYS = frozenset({"kind", "text", "message_id", "warning", "source"})
-_FILE_PATTERN = re.compile(r"(?:conversations/[A-Za-z0-9_-]{1,128}\.json|readable/[A-Za-z0-9_-]{1,128}\.md)\Z")
+_FILE_PATTERN = re.compile(r"(?:conversations/[A-Za-z0-9_-]{1,128}\.json|readable/[A-Za-z0-9_-]{1,128}\.md|code/index\.json|code/blobs/[0-9a-f]{64})\Z")
 _ROOT_FILES = frozenset({"manifest.json", "library.json", "compatibility.json"})
 _PRIVATE_ID_KEYS = frozenset({"thread_id", "source_thread_id", "conversation_id"})
 
@@ -206,17 +207,26 @@ def _compatibility(conversations, source):
     }
 
 
+def _entry_limit(path):
+    if path in ('code/index.json', 'manifest.json'):
+        return 8 * 1024 * 1024
+    if path.startswith('code/blobs/'):
+        return 16 * 1024 * 1024
+    return MAX_METADATA_BYTES if path in _ROOT_FILES else MAX_CONVERSATION_BYTES
+
+
 def _check_size(path, data):
-    limit = MAX_METADATA_BYTES if path in _ROOT_FILES else MAX_CONVERSATION_BYTES
+    limit = _entry_limit(path)
     if len(data) > limit:
         raise PackageError(f"{path} exceeds its {limit}-byte limit")
 
 
-def build_package(conversations, title, description='', source=None) -> bytes:
+def build_package(conversations, title, description='', source=None, code_checkpoint=None, code=None) -> bytes:
     """Normalize selected conversations and return a deterministic .contextpack.
 
-    Unknown fields are omitted rather than exporting arbitrary application
-    state. System/developer roles are rejected. Caller objects are not mutated.
+    Unknown conversation fields are omitted rather than exporting arbitrary
+    application state. Optional code has an exact bounded schema and content
+    hashes. System/developer roles are rejected. Caller objects are not mutated.
     """
     conversations = _normalize_conversations(conversations)
     source = _metadata({} if source is None else source, "source", _SOURCE_KEYS)
@@ -227,6 +237,9 @@ def build_package(conversations, title, description='', source=None) -> bytes:
         "source": source,
         "conversation_ids": [conversation["id"] for conversation in conversations],
     }
+    if code_checkpoint is not None:
+        from .checkpoints import validate_checkpoint
+        library["code_checkpoint"] = validate_checkpoint(code_checkpoint)
     entries = {
         "library.json": _json_bytes(library),
         "compatibility.json": _json_bytes(_compatibility(conversations, source)),
@@ -234,6 +247,12 @@ def build_package(conversations, title, description='', source=None) -> bytes:
     for number, conversation in enumerate(conversations, 1):
         entries[f"conversations/{number:04d}.json"] = _json_bytes(conversation)
         entries[f"readable/{number:04d}.md"] = _markdown(conversation)
+    if code is not None:
+        from .code_repository import blob_bytes, code_summary, validate_code
+        code = validate_code(code, conversations)
+        entries['code/index.json'] = _json_bytes(code_summary(code))
+        for digest, encoded in code['blobs'].items():
+            entries['code/blobs/' + digest] = blob_bytes(encoded)
     manifest = {
         "format": "contextpack",
         "schema_version": SCHEMA_VERSION,
@@ -304,7 +323,7 @@ def _read_entries(data):
                     raise PackageError("Only regular files are permitted in a package")
                 if info.flag_bits & 1 or info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                     raise PackageError("Encrypted or unsupported ZIP compression")
-                limit = MAX_METADATA_BYTES if path in _ROOT_FILES else MAX_CONVERSATION_BYTES
+                limit = _entry_limit(path)
                 if not 0 <= info.file_size <= limit:
                     raise PackageError(f"{path} exceeds its decompressed size limit")
                 total += info.file_size
@@ -315,7 +334,7 @@ def _read_entries(data):
             entries = {}
             actual_total = 0
             for info in infos:
-                limit = MAX_METADATA_BYTES if info.filename in _ROOT_FILES else MAX_CONVERSATION_BYTES
+                limit = _entry_limit(info.filename)
                 with archive.open(info) as stream:
                     contents = stream.read(limit + 1)
                     if len(contents) != info.file_size or len(contents) > limit or stream.read(1):
@@ -380,6 +399,9 @@ def read_package(data) -> dict:
         "source": _metadata(library.get("source"), "library.source", _SOURCE_KEYS),
         "conversation_ids": [conversation["id"] for conversation in normalized],
     }
+    if "code_checkpoint" in library:
+        from .checkpoints import validate_checkpoint
+        expected_library["code_checkpoint"] = validate_checkpoint(library["code_checkpoint"])
     if library != expected_library:
         raise PackageError("Library fields or conversation order are inconsistent")
     compatibility = _load_json(entries["compatibility.json"], "compatibility.json")
@@ -387,7 +409,19 @@ def read_package(data) -> dict:
             or type(compatibility.get("native_restore_verified")) is not bool
             or type(compatibility.get("model_continuation_verified")) is not bool):
         raise PackageError("Compatibility report disagrees with normalized contents")
-    return {"manifest": manifest, "library": library, "conversations": normalized, "compatibility": compatibility}
+    result = {"manifest": manifest, "library": library, "conversations": normalized, "compatibility": compatibility}
+    code_entries = {path for path in entries if path.startswith('code/')}
+    if code_entries:
+        from .code_repository import validate_code
+        if 'code/index.json' not in code_entries:
+            raise PackageError('Code blobs require a code index')
+        code = _load_json(entries['code/index.json'], 'code/index.json')
+        if 'blobs' in code:
+            raise PackageError('Code index must not contain inline blobs')
+        code['blobs'] = {path.removeprefix('code/blobs/'): base64.b64encode(entries[path]).decode('ascii')
+                         for path in code_entries if path != 'code/index.json'}
+        result['code'] = validate_code(code, normalized)
+    return result
 
 
 _REDACTIONS = (

@@ -85,7 +85,10 @@ class LibraryState:
             draft = {'base_version': base_id,
                      'title': package['library']['title'],
                      'description': package['library']['description'],
+                     'code_checkpoint': package['library'].get('code_checkpoint'),
                      'conversations': package['conversations'], 'message': message}
+            if 'code' in payload:
+                draft['code'] = package.get('code')
             db.execute('''INSERT INTO package_drafts VALUES (?,?,?,?)
                 ON CONFLICT(package_id) DO UPDATE SET revision=excluded.revision,
                 payload_json=excluded.payload_json,updated_at=excluded.updated_at''',

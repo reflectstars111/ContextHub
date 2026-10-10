@@ -229,6 +229,29 @@ class Store(LibraryState):
         for name, value in sorted(files.items()):
             oid = self._git('hash-object', '-w', '--stdin', data=json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
             tree.append(f'100644 blob {oid}\t{name}\n')
+        if package.get('code'):
+            from .code_repository import blob_bytes, code_summary
+            code = package['code']
+            head = next(s for s in code['snapshots'] if s['id'] == code['head'])
+            hierarchy = {}
+            for entry in head['files']:
+                node = hierarchy
+                parts = entry['path'].split('/')
+                for component in parts[:-1]:
+                    node = node.setdefault(component, {})
+                node[parts[-1]] = (entry['mode'], self._git(
+                    'hash-object', '-w', '--stdin', data=blob_bytes(code['blobs'][entry['sha256']])))
+
+            def write_tree(node):
+                records = []
+                for name, value in sorted(node.items()):
+                    mode, kind, oid = ('040000', 'tree', write_tree(value)) if isinstance(value, dict) else (value[0], 'blob', value[1])
+                    records.append(f'{mode} {kind} {oid}\t{name}'.encode() + b'\0')
+                return self._git('mktree', '-z', data=b''.join(records))
+
+            tree.append(f'040000 tree {write_tree(hierarchy)}\tcode\n')
+            oid = self._git('hash-object', '-w', '--stdin', data=json.dumps(code_summary(code), ensure_ascii=False).encode())
+            tree.append(f'100644 blob {oid}\tcode-index.json\n')
         tree_id = self._git('mktree', data=''.join(tree).encode())
         parents = ['-p', parent] if parent else []
         if second_parent:
@@ -496,11 +519,51 @@ class Store(LibraryState):
         return (self.blobs / (row['sha256'] + '.contextpack')).read_bytes()
 
     def detail(self, ident, user_id=None, version_id=None):
+        from .checkpoints import checkpoint_status
+        from .code_repository import code_summary
         row = self._selected(ident, user_id, version_id)
         package = read_package((self.blobs / (row['sha256'] + '.contextpack')).read_bytes())
         return {**row, 'title': package['library']['title'], 'description': package['library']['description'],
                 'conversations': package['conversations'], 'compatibility': package['compatibility'],
-                'library_source': package['library']['source'], 'platforms': package_platforms(package)}
+                'library_source': package['library']['source'], 'platforms': package_platforms(package),
+                'code_checkpoint': package['library'].get('code_checkpoint'),
+                'code_checkpoint_status': checkpoint_status(package),
+                'code': code_summary(package.get('code'))}
+
+    def code_view(self, ident, user_id=None, version_id=None, snapshot=None, path=None, action='summary'):
+        """Authorize the selected repository/version before looking up any code."""
+        from .code_repository import blob_bytes, code_diff, code_summary, validate_code_path
+        code = read_package(self.download(ident, user_id, version_id)).get('code')
+        if code is None:
+            raise FileNotFoundError('此版本未包含代码快照')
+        selected = snapshot or code['head']
+        head = next((s for s in code['snapshots'] if s['id'] == selected), None)
+        if head is None:
+            raise FileNotFoundError('代码快照不存在于所选仓库版本')
+        if action == 'summary':
+            return code_summary(code)
+        if action == 'diff':
+            return code_diff(None, code, snapshot=selected)
+        if action != 'file':
+            raise ValueError('不支持的代码操作')
+        validate_code_path(path)
+        entry = next((f for f in head['files'] if f['path'] == path), None)
+        if entry is None:
+            raise FileNotFoundError('代码文件不存在于所选快照')
+        raw = blob_bytes(code['blobs'][entry['sha256']])
+        limit = 1024 * 1024
+        binary, content = b'\0' in raw, None
+        if not binary:
+            try:
+                content = raw[:limit].decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    raw.decode('utf-8')
+                    content = raw[:limit].decode('utf-8', errors='ignore')
+                except UnicodeDecodeError:
+                    binary = True
+        return {**entry, 'snapshot_id': selected, 'content': content, 'binary': binary,
+                'truncated': len(raw) > limit}
 
     def versions(self, ident, user_id=None):
         with self.db() as db:

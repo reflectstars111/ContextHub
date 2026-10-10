@@ -70,6 +70,7 @@ def main():
 
             preview(page, '将草稿发布为正式版本'); save(page, 2)
             assert api(page, url, f'/api/packages/{ident}/draft')['draft'] is None
+            page.locator('[data-repository-section="library-settings"]').click()
             page.locator('#library-settings').evaluate('(element) => { element.open = true; }')
             page.once('dialog', lambda dialog: dialog.accept())
             page.locator('#change-visibility').click()
@@ -96,6 +97,7 @@ def main():
             expect(page.locator('#reader-metadata')).to_contain_text('公开')
             detail = api(page, url, f'/api/packages/{ident}')
             fork = api(bob, url, f'/api/packages/{ident}/fork', {'version_id': detail['head_version_id'], 'visibility': 'private'})
+            page.locator('[data-repository-section="library-settings"]').click()
             page.locator('#library-settings').evaluate('(element) => { element.open = true; }')
             page.once('dialog', lambda dialog: dialog.accept(ident))
             page.locator('#purge-package').click()

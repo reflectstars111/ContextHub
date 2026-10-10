@@ -14,6 +14,8 @@ function privateDraftPayload() {
   if (!isDraft()) throw new Error("请先打开编辑副本。");
   return { base_version: versionState.original.version.id,
     title: $("draft-title").value.trim(), description: $("draft-description").value.trim(),
+    ...(Object.hasOwn(state.reader, "code_checkpoint") ? { code_checkpoint: structuredClone(state.reader.code_checkpoint) } : {}),
+    ...(Object.hasOwn(state.reader, "codeReplacement") ? { code: structuredClone(state.reader.codeReplacement) } : {}),
     conversations: structuredClone(state.reader.conversations), message: $("version-message").value.trim() };
 }
 function draftSynced() {

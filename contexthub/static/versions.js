@@ -42,6 +42,7 @@ function clearDraftState() {
 }
 function draftChanged() {
   if (!isDraft()) return;
+  if (typeof renderRepository === "function") renderRepository(state.reader);
   versionState.preview = null;
   $("save-version").disabled = true;
   $("draft-status").textContent = "草稿已更新，请重新预览";
@@ -53,6 +54,7 @@ function renderVersionWorkspace(data) {
   $("version-workspace").hidden = !hub;
   renderPackageContributions(data);
   renderLibrarySettings(data);
+  if (typeof renderRepository === "function") renderRepository(data);
   if (!hub) return;
   const draft = isDraft();
   const version = data.version || {};
@@ -87,6 +89,7 @@ async function loadVersions(data) {
   const response = await api(`/api/packages/${encodeURIComponent(data.id)}/versions`);
   if (request !== versionState.request || !state.reader || state.reader.id !== data.id || isDraft()) return;
   versionState.versions = response.versions || [];
+  renderRepositoryHistory(data, versionState.versions);
   for (const id of ["version-select", "compare-from", "compare-to"]) {
     const select = $(id); select.replaceChildren();
     for (const version of versionState.versions) {
@@ -118,7 +121,8 @@ async function startDraft() {
   $("save-version").textContent = original.visibility === "public" ? "发布新版本" : "保存新版本";
   $("draft-boundary").textContent = "草稿自动保存到服务器，仅你可见。" + (original.visibility === "public" ? "发布后，任何人都能阅读新版本，登录后可下载。" : "保存的新版本也仅你可见。") + "历史版本保持不变。";
   clearCandidate();
-  openReader({ ...structuredClone(original), ...(draft ? { conversations: structuredClone(draft.conversations) } : {}), kind: "draft" });
+  openReader({ ...structuredClone(original), ...(draft ? { conversations: structuredClone(draft.conversations), code_checkpoint: structuredClone(draft.code_checkpoint || null),
+    ...(Object.hasOwn(draft, "code") ? { codeReplacement: structuredClone(draft.code), code: portableCodeSummary(draft.code) } : {}) } : {}), kind: "draft" });
   if (draft) {
     draftStorage.signature = JSON.stringify(privateDraftPayload());
     draftStorageStatus("已恢复服务器草稿，仅你可见");
@@ -150,7 +154,9 @@ function versionPayload() {
   if (!title) { $("draft-title").focus(); throw new Error("请填写对话库标题。"); }
   if (!message) { $("version-message").focus(); throw new Error("请填写本次保存说明。"); }
   return { base_version: versionState.original.version.id, expected_visibility: versionState.original.visibility,
-    title, description: $("draft-description").value.trim(), conversations: state.reader.conversations, message };
+    title, description: $("draft-description").value.trim(), conversations: state.reader.conversations,
+    code_checkpoint: state.reader.code_checkpoint || null,
+    ...(Object.hasOwn(state.reader, "codeReplacement") ? { code: state.reader.codeReplacement } : {}), message };
 }
 async function previewDraft() {
   versionState.preview = null;
@@ -166,7 +172,7 @@ async function previewDraft() {
     if (response.compatibility) {
       const warnings = node("div"); renderWarnings(warnings, response); $("draft-comparison").append(warnings);
     }
-    const changed = (comparison.library_changes || []).length || (comparison.changes || []).length || comparison.conversation_order_changed;
+    const changed = (comparison.library_changes || []).length || (comparison.changes || []).length || comparison.conversation_order_changed || codeComparisonChanged(comparison.code);
     versionState.preview = changed ? signature : null;
     $("save-version").disabled = !changed;
     $("draft-status").textContent = changed ? "变化已预览，确认后保存" : "没有内容变化，无需保存新版本";
@@ -223,6 +229,7 @@ function renderDraftConversation(conversation) {
     if (!requireSavedEditor()) return;
     const message = { id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `message-${Date.now()}-${Math.random().toString(36).slice(2)}`, role, content: "", provenance: "human_authored", transformations: [] };
     conversation.messages.push(message);
+    selectConversationMessage(conversation, message.id);
     draftChanged(); renderConversationTabs(); renderConversation();
     const section = $("messages").querySelector(".message:last-of-type");
     editMessage(section, section.querySelector(".message-content"), conversation, message, section.querySelector(".message-actions"));
@@ -234,6 +241,7 @@ function moveDraftMessage(conversation, index, direction) {
   const target = index + direction;
   if (target < 0 || target >= conversation.messages.length) return;
   [conversation.messages[index], conversation.messages[target]] = [conversation.messages[target], conversation.messages[index]];
+  selectConversationMessage(conversation, conversation.messages[target].id);
   draftChanged(); renderConversation();
 }
 function clearCandidate() {
@@ -269,9 +277,12 @@ function applyCandidate() {
   if (!isDraft() || !versionState.candidate || !requireSavedEditor()) return;
   const candidate = versionState.candidate;
   state.reader.conversations = structuredClone(candidate.conversations);
+  state.reader.code_checkpoint = structuredClone(candidate.library.code_checkpoint || null);
+  state.reader.codeReplacement = structuredClone(candidate.code || null);
+  state.reader.code = portableCodeSummary(candidate.code);
   $("draft-title").value = candidate.library.title || "";
   $("draft-description").value = candidate.library.description || "";
-  state.conversationIndex = 0;
+  state.conversationIndex = 0; state.turnKey = null; state.turnPage = 0; $("turn-search").value = "";
   clearCandidate(); draftChanged(); renderConversationTabs(); renderConversation();
   showStatus("候选内容已替换草稿。请填写保存说明并预览变化，原有版本仍然保留。");
 }
@@ -311,7 +322,7 @@ async function submitFork(event) {
   updateForkLabel();
 }
 function changeName(kind) { return { added: "新增", removed: "删除", modified: "修改", reordered: "重排", moved: "重排" }[kind] || kind || "变化"; }
-function fieldName(field) { return { title: "标题", description: "描述", context: "上下文", source: "来源", tags: "标签", annotations: "编辑记录", provenance: "消息来源", transformations: "消息变更记录" }[field] || field; }
+function fieldName(field) { return { title: "标题", description: "描述", context: "上下文", source: "来源", tags: "标签", annotations: "编辑记录", provenance: "消息来源", transformations: "消息处理记录" }[field] || field; }
 function comparisonValue(value) { return typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "（无）"; }
 function diffSides(before, after, message = false) {
   const sides = node("div", "diff-sides");
@@ -332,6 +343,9 @@ function diffMetadata(field) {
   const box = node(technical ? "details" : "div", technical ? "diff-metadata" : "");
   box.append(node(technical ? "summary" : "h4", "diff-field", `${fieldName(field.field)}${technical ? "有变化 · 展开查看" : ""}`), diffSides(field.before, field.after));
   return box;
+}
+function codeComparisonChanged(code) {
+  return Boolean(code && (code.changed || code.before_snapshot !== code.after_snapshot || (code.files || []).length));
 }
 function renderComparison(container, comparison) {
   container.replaceChildren(); container.hidden = false;
@@ -362,7 +376,14 @@ function renderComparison(container, comparison) {
     }
     container.append(box);
   }
-  if (!(comparison.changes || []).length && !(comparison.library_changes || []).length && !comparison.conversation_order_changed) container.append(node("p", "subtle", "这两个快照没有内容差异。"));
+  if (comparison.code) {
+    const code = comparison.code, counts = code.summary || {}, box = node("details", "diff-change code-version-comparison");
+    box.open = codeComparisonChanged(code);
+    box.append(node("summary", "", `代码 · 新增 ${counts.files_added || 0} · 修改 ${counts.files_modified || 0} · 删除 ${counts.files_removed || 0} 个文件`));
+    if (typeof renderCodeComparison === "function") renderCodeComparison(box, code);
+    container.append(box);
+  }
+  if (!(comparison.changes || []).length && !(comparison.library_changes || []).length && !comparison.conversation_order_changed && !codeComparisonChanged(comparison.code)) container.append(node("p", "subtle", "这两个快照没有内容差异。"));
 }
 async function compareVersions() {
   const from = $("compare-from").value;
@@ -390,7 +411,7 @@ function bindVersionEvents() {
   $("fork-package").addEventListener("click", () => openForkDialog());
   $("fork-form").addEventListener("submit", submitFork);
   document.querySelectorAll('input[name="fork-visibility"]').forEach((radio) => radio.addEventListener("change", updateForkLabel));
-  $("compare-versions").addEventListener("click", () => { $("compare-panel").hidden = false; perform(compareVersions); });
+  $("compare-versions").addEventListener("click", () => { setRepositorySection("version-history-panel"); $("compare-panel").hidden = false; perform(compareVersions); });
   $("close-comparison").addEventListener("click", () => { $("compare-panel").hidden = true; });
   $("run-comparison").addEventListener("click", () => perform(compareVersions));
   window.addEventListener("beforeunload", (event) => { if (isDraft() && !draftSynced()) { event.preventDefault(); event.returnValue = ""; } });

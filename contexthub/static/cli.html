@@ -12,12 +12,12 @@
     <section class="hero">
       <p class="eyebrow">CONVERSATIONS, VERSIONED.</p>
       <h1>在终端里，<br>让对话持续演化。</h1>
-      <p class="lead">用熟悉的 add、commit、push 和 pull，管理你的 AI 对话。<br>本地整理，提交留档，与 ContextHub 同步。</p>
-      <div class="actions"><a class="button" href="/ctx.pyz" download>下载 ctx · 0.7.0</a><a href="#windows">Windows 安装 ↓</a><a href="#install">Linux 安装 ↓</a></div>
+      <p class="lead">用熟悉的 add、commit、push 和 pull，一起管理 AI 对话与项目代码。<br>本地采集，提交留档，与 ContextHub 同步。</p>
+      <div class="actions"><a class="button" href="/ctx.pyz" download>下载 ctx · 0.10.0</a><a href="#windows">Windows 安装 ↓</a><a href="#install">Linux 安装 ↓</a></div>
       <p class="note">Windows 预览版 / Linux · Python 3.12+ · 运行时无第三方 Python 依赖 · MIT 开源</p>
     </section>
-    <div class="benefits"><article><span>01</span><h2>整理多种来源</h2><p>导入 Codex 对话包、Claude 和 DeepSeek 导出文件，在同一工作区管理。</p></article><article><span>02</span><h2>每次修改有记录</h2><p>先查看差异，再提交版本。提交保存在本机，运行 push 才会上传。</p></article><article><span>03</span><h2>跨机器继续整理</h2><p>克隆固定版本，拉取更新。独立修改自动合并，冲突保留双方内容。</p></article></div>
-    <section id="windows"><p class="eyebrow">WINDOWS / POWERSHELL</p><h2>在 Windows 终端使用 ctx</h2><p>Windows 10 / 11 原生预览版，需要 Python 3.12+。适用于 PowerShell、CMD 和 VS Code 本地终端；无需 WSL。已同步 Windows 11 本机修复；本次新增功能的原生 Windows CI 待运行，仍保留预览标记。</p>
+    <div class="benefits"><article><span>01</span><h2>整理多种来源</h2><p>导入 Codex 对话包、Claude 和 DeepSeek 导出文件，在同一工作区管理，并保存对应代码。</p></article><article><span>02</span><h2>每次修改有记录</h2><p>先查看差异，再提交版本。提交保存在本机，运行 push 才会上传。</p></article><article><span>03</span><h2>跨机器继续整理</h2><p>克隆固定版本，拉取更新。独立修改自动合并，冲突保留双方内容。</p></article></div>
+    <section id="windows"><p class="eyebrow">WINDOWS / POWERSHELL</p><h2>在 Windows 终端使用 ctx</h2><p>Windows 10 / 11 原生预览版，需要 Python 3.12+。适用于 PowerShell、CMD 和 VS Code 本地终端；无需 WSL。已同步 Windows 11 本机修复；0.10.0 代码采集与恢复尚未完成原生 Windows 验收，仍保留预览标记。</p>
       <p>先检查 <code>py -3 --version</code>。下载安装脚本，查看内容后运行；安装到当前用户目录，不需要管理员权限。</p>
 <pre><code>Invoke-WebRequest https://contexthub.reflectstars.dev/install-ctx.ps1 -OutFile .\install-ctx.ps1
 Get-Content .\install-ctx.ps1
@@ -46,29 +46,46 @@ ctx --version</code></pre>
     </section>
     <section><h2>导入 → 提交 → 推送</h2><p>先在网站注册账号，再在终端登录。Windows 与 Linux 使用相同命令。密码交互输入，登录会话按站点保存在用户配置目录。</p>
 <pre><code>ctx auth login --username 你的用户名
-ctx init my-dialogues --title "我的对话库"
-cd my-dialogues
-ctx add ../conversation.contextpack
+ctx init --title "项目开发对话"
+ctx add --codex  # 当前会话 + Git 工作区代码
 # 也可以：ctx add ../claude-export.json --platform claude
 ctx diff --staged
-ctx commit -m "整理第一批对话"
+ctx commit -m "保存开发进度"
 ctx push</code></pre>
-      <p class="note">首次 push 默认创建私有库。明确要公开时，首次使用 ctx push --visibility public。存在转换遗漏或使用原文存档时，检查命令提示后再加 --confirm-import。</p>
+      <p class="note">add --codex 直接识别当前 Codex 会话并记住来源，无需手动导出文件，同时采集当前 Git 工作区的代码，包括未提交修改和未被忽略的未跟踪文件。普通终端仅自动选择与工作区目录完全匹配的唯一会话；多个候选时用 --thread ID 指定。在 Codex 内执行时，本轮会留到下次采集。首次 push 默认创建私有库，明确公开时才使用 --visibility public。文件导入遇到转换遗漏时，检查提示后再加 --confirm-import。</p>
     </section>
-    <section><h2>修改与同步</h2><p>在 VS Code 中编辑 library.json 和 conversations/ 内的 JSON；添加外部文件仍使用 ctx add 文件名。</p>
+    <section><h2>继续对话与同步</h2><p>继续与 Codex 对话后，用 add . 同时更新已跟踪会话与代码。也可编辑受管 JSON；添加 Claude、DeepSeek 等外部文件仍使用 ctx add 文件名。</p>
 <pre><code>ctx status
 ctx diff
 ctx add .
 ctx diff --staged
-ctx commit -m "补充背景与回答"
+ctx commit -m "完成登录功能"
 ctx push
 
 # 另一台机器：登录后粘贴网站的分享链接
 ctx clone 'https://contexthub.reflectstars.dev/?package=仓库ID' my-copy
 cd my-copy
 ctx pull</code></pre>
-      <p class="note">add . 只暂存受管的对话文件，不扫描项目。pull 要求工作区干净；有本地和远端新提交时，独立修改会自动合并。冲突时保留双方快照并输出 incoming 分支，编辑后可显式解决。支持 branch、switch、merge，不支持强制覆盖。clone 取得所选快照，log 记录此后本地的提交；网站可查看完整远程历史。</p>
+      <p class="note">add . 刷新当前分支的已跟踪对话，采集代码后一起暂存；重复采集不生成空变更。人工修改会阻止覆盖，可用 --no-refresh 跳过对话刷新。--no-code 仅更新对话并保留旧代码；--code 路径可指定 Git 工作区。没有 Git 仓库时仅更新对话并提示。commit 只保存暂存区，push 不额外读取 Codex。本机来源绑定不进入上传包或 clone。pull 要求工作区干净；代码按文件三方比较，同文件不同修改会冲突，不自动拼接文本；对话保留字段级合并。支持 branch、switch、merge；clone 取得所选快照，网站保留远程版本历史。</p>
     </section>
+    <section id="code-checkpoints"><h2>代码与对话一起恢复</h2><p>默认保存的代码包含工作区当前文件。上传、clone、Fork 和导出都会携带它们；在另一台机器无需原 Git 仓库即可恢复。</p>
+<pre><code>ctx add .
+ctx diff --staged
+ctx commit -m "保存代码与对话"
+ctx push
+ctx restore HEAD --to ../restored-project
+ctx restore HEAD --snapshot SNAPSHOT_ID --to ../restored-snapshot
+ctx restore HEAD --message MESSAGE_ID --to ../restored-message
+# 同时创建 Codex 新会话：添加 --codex
+# 多段对话或消息 ID 重名时另选 --conversation CONVERSATION_ID</code></pre>
+      <p class="note">目标必须是新目录，包含 code/ 源文件、conversations/ 中保留完整包的 ctx 工作区和 receipt.json。不会创建虚构的 .git 历史。--snapshot 与 --message 二选一；无代码关联的旧消息不会被推测补齐。--message 配合 --codex 时仅导入截至该消息的正文，完整包另行保留。</p>
+      <p class="note">每次采集只关联对话最新一轮，表示保存时的代码，不代表消息生成时的执行状态。--resume 可核验已有恢复；Codex 原生导入状态不确定时不会自动重试。其版本、附件和工具状态限制仍适用。</p>
+      <p class="note">含代码的包需逐个导入，默认保留包内代码；显式 --no-code 保留当前工作区旧代码，显式 --code 路径采集指定 Git 工作区。代码上限：128 个快照、每快照 10,000 文件、单文件 16 MiB、全部历史去重文件 64 MiB；整包解压合计 100 MiB。服务端可另设更小请求上限。</p>
+      <details><summary>旧式 Git 提交检查点</summary><p>只有 Git 提交关联、未携带代码的旧包，仍需本机拥有原代码提交。捕获要求代码与对话干净，恢复生成该提交的独立浅历史仓库。</p>
+<pre><code>ctx checkpoint --code ../my-project -m "固定 Git 提交"
+ctx restore HEAD --code ../my-project --to ../restored-legacy</code></pre><p class="note">旧式流程不支持子模块、符号链接、LFS 指针或经过滤器/换行转换的工作文件；对话变化后要重新建立检查点。其代码仓库权限与 Hub 权限分别管理。</p></details>
+    </section>
+    <section><h2>在网页按目录阅读</h2><p>对话按日期与轮次组织，默认显示最新轮次；可搜索、切换前后轮，较长轮次分页。新采集使用真实 Codex 轮次开始时间，旧版本不自动补时间，缺失时显示“时间未记录”。</p><p>点击消息的“采集时的代码”查看对应快照；“代码”中按目录浏览文件、切换快照和查看真实 diff。“导入与处理记录”只说明格式转换、脱敏和人工编辑，没有代码关联的消息显示“未记录当时代码”。</p></section>
     <section><h2>复用别人的对话</h2><p>公开库可匿名阅读，所有克隆、下载与写操作均须登录。修改别人的库时，先创建自己的 Fork。</p>
 <pre><code>ctx fork 'https://contexthub.reflectstars.dev/?package=仓库ID' my-fork
 cd my-fork
@@ -83,7 +100,7 @@ ctx export ../shared.contextpack</code></pre>
 ctx switch main
 ctx merge improve
 ctx git export ../conversation-git
-ctx git import ../conversation-git ../restored-context</code></pre><p class="note">Git 导出/导入目录必须不存在。导出的仓库可用普通 git clone、push 管理；导入读取其已提交的受管对话与分支，不读取项目杂项。Hub 的 clone 仍下载所选快照。</p></section>
+ctx git import ../conversation-git ../restored-context</code></pre><p class="note">Git 导出/导入目录必须不存在。导出的仓库可用普通 git clone、push 管理；导入读取其已提交的受管对话、包内代码与分支，不扫描任意项目文件。Hub 的 clone 下载所选快照，不提供原生 Git 协议服务。</p></section>
     <section><h2>连接本机 Codex</h2><p>安装 Codex CLI 后，可以直接使用 ctx 的本地桥接命令。Windows 优先识别 codex.exe 和常见 npm 安装；找不到时，可将 CONTEXTHUB_CODEX_EXE 设为本机 codex.exe 完整路径。</p>
 <pre><code>ctx codex list
 ctx codex export --thread 会话ID --title "项目讨论" -o codex.contextpack

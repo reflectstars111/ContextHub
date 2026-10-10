@@ -23,7 +23,7 @@ MAX_METADATA_CHARACTERS = 100_000
 MAX_METADATA_NODES = 3000
 _CONVERSATION_FIELDS = ("title", "context", "tags", "source", "annotations")
 _MESSAGE_FIELDS = ("role", "content", "provenance", "transformations")
-_LIBRARY_FIELDS = ("title", "description", "source")
+_LIBRARY_FIELDS = ("title", "description", "source", "code_checkpoint")
 
 
 def _digest(value):
@@ -217,7 +217,11 @@ def build_revision(base_package, payload):
     for conversation in conversations:
         if pending[conversation["id"]]:
             conversation.setdefault("annotations", []).extend(pending[conversation["id"]])
-    return build_package(conversations, title, description, source=base_package["library"]["source"])
+    checkpoint = payload.get("code_checkpoint", base_package["library"].get("code_checkpoint"))
+    from .code_repository import prune_bindings
+    code = prune_bindings(payload.get('code', base_package.get('code')), conversations)
+    return build_package(conversations, title, description, source=base_package["library"]["source"],
+                         code_checkpoint=checkpoint, code=code)
 
 
 class _Details:
@@ -332,4 +336,8 @@ def compare_packages(before, after):
             change["title"] = details.text(change["title"])
             result["changes"].append(change)
     result["truncated"] = details.truncated
+    if before.get('code') is not None or after.get('code') is not None:
+        from .code_repository import code_diff
+        result['code'] = code_diff(before.get('code'), after.get('code'))
+        result['truncated'] |= result['code']['truncated']
     return result

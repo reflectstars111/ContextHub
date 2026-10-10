@@ -8,3 +8,8 @@ __pycache__/
 .artifacts/
 /build/
 /dist/
+/.contexthub/
+/library.json
+/conversations/
+
+/code.json

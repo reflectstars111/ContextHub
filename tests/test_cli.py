@@ -11,6 +11,62 @@ from pathlib import Path
 
 
 class CLITests(unittest.TestCase):
+    def test_codex_export_before_turn_writes_only_the_selected_history(self):
+        from contexthub.__main__ import main
+        from contexthub.package import read_package
+        from tests.test_codex import FixtureClient, page, turn, USER, ASSISTANT
+
+        def handle(method, params):
+            if method == 'thread/read':
+                return {'thread': {'id': 'source', 'historyMode': 'paginated', 'name': 'Synthetic'}}
+            if method == 'thread/turns/list':
+                return page([turn('old', [USER], 'interrupted'),
+                             turn('active', [ASSISTANT], 'interrupted')])
+            self.fail('Unexpected Codex mutation: ' + method)
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'history.contextpack'
+            with patch('contexthub.codex.CodexClient') as client, contextlib.redirect_stdout(io.StringIO()):
+                client.return_value.__enter__.return_value = FixtureClient(handle)
+                code = main(['export', '--thread', 'source', '--before-turn', 'active', '-o', str(path)])
+            self.assertEqual(code, 0)
+            messages = read_package(path.read_bytes())['conversations'][0]['messages']
+            self.assertEqual([m['role'] for m in messages], ['user'])
+            self.assertEqual([m['provenance']['turn_id'] for m in messages], ['old'])
+
+    def test_codex_export_before_turn_rejects_multiple_threads_before_reading_codex(self):
+        from contexthub.__main__ import main
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'history.contextpack'
+            error = io.StringIO()
+            with patch('contexthub.codex.CodexClient', side_effect=AssertionError('Must not read Codex')), \
+                    contextlib.redirect_stderr(error):
+                code = main(['export', '--thread', 'one', '--thread', 'two', '--before-turn', 'active',
+                             '-o', str(path)])
+            self.assertEqual(code, 1)
+            self.assertIn('before-turn', error.getvalue())
+            self.assertFalse(path.exists())
+
+    def test_codex_empty_export_fails_without_creating_file(self):
+        from contexthub.__main__ import main
+        from tests.test_codex import FixtureClient, page
+
+        def handle(method, params):
+            if method == 'thread/read':
+                return {'thread': {'id': 'source', 'historyMode': 'paginated'}}
+            if method == 'thread/turns/list':
+                return page([])
+            self.fail('Unexpected Codex mutation: ' + method)
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'empty.contextpack'
+            with patch('contexthub.codex.CodexClient') as client, \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                client.return_value.__enter__.return_value = FixtureClient(handle)
+                code = main(['export', '--thread', 'source', '-o', str(path)])
+            self.assertEqual(code, 1)
+            self.assertFalse(path.exists())
+
     def test_transfer_requests_identify_contexthub_and_preserve_cookie_csrf(self):
         from contexthub import __version__
         from contexthub.__main__ import demo

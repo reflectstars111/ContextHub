@@ -301,7 +301,7 @@ def _snapshot(git, oid):
             path = name.decode('utf-8')
         except (UnicodeError, ValueError):
             raise GitBridgeError('Git tree 包含不支持的文件名') from None
-        if path in (_MARKER, _SNAPSHOT, 'library.json') or path.startswith('conversations/'):
+        if path in (_MARKER, _SNAPSHOT, 'library.json', 'code.json') or path.startswith('conversations/'):
             if (path in files or mode != '100644' or kind != 'blob' or not _OID.fullmatch(object_id)
                     or (path.startswith('conversations/') and not Workspace._valid_path(path))):
                 raise GitBridgeError('Git 受管路径包含链接、重复文件、可执行文件或不安全路径')
@@ -312,7 +312,7 @@ def _snapshot(git, oid):
     if not isinstance(marker, dict) or set(marker) != {'format', 'version', 'commit'} or marker['format'] != _FORMAT or type(marker['version']) is not int or marker['version'] != 1:
         raise GitBridgeError('不支持的 ContextHub Git 格式')
     library = _load_json(git.blob(files['library.json'], MAX_METADATA_BYTES), 'library.json')
-    if not isinstance(library, dict) or set(library) != {'schema_version', 'title', 'description', 'source', 'conversation_ids'}:
+    if not isinstance(library, dict) or set(library) - {'code_checkpoint'} != {'schema_version', 'title', 'description', 'source', 'conversation_ids'}:
         raise GitBridgeError('Git library.json 格式无效')
     identifiers = library['conversation_ids']
     if not isinstance(identifiers, list) or not 1 <= len(identifiers) <= 200 or any(not isinstance(i, str) for i in identifiers):
@@ -330,7 +330,10 @@ def _snapshot(git, oid):
         if not isinstance(conversation, dict) or conversation.get('id') != identifier:
             raise GitBridgeError('Git 对话身份与文件名不一致')
         conversations.append(conversation)
-    canonical = build_package(conversations, library['title'], library['description'], source=library['source'])
+    code = (_load_json(git.blob(files['code.json'], MAX_TOTAL_BYTES), 'code.json')
+            if 'code.json' in files else None)
+    canonical = build_package(conversations, library['title'], library['description'], source=library['source'],
+                              code_checkpoint=library.get('code_checkpoint'), code=code)
     checked = read_package(canonical)
     if checked['library'] != library or checked['conversations'] != conversations:
         raise GitBridgeError('Git JSON 必须使用导出的规范 ContextHub 格式')
@@ -338,7 +341,7 @@ def _snapshot(git, oid):
     if _SNAPSHOT in files:
         original = git.blob(files[_SNAPSHOT], MAX_ARCHIVE_BYTES)
         package = read_package(original)
-        if package['library'] != library or package['conversations'] != conversations:
+        if package['library'] != library or package['conversations'] != conversations or package.get('code') != code:
             original = None  # Ordinary Git edits can leave the old ZIP untouched.
     return original or canonical, marker['commit'], original is not None
 
@@ -388,7 +391,7 @@ def import_git(directory, destination):
                     ws._commit_record(saved['id'])
                 else:
                     if parent_ids:
-                        blob = _revision_data(ws.package_bytes(parent_ids[0]), dict(package['library'], conversations=package['conversations']))
+                        blob = _revision_data(ws.package_bytes(parent_ids[0]), dict(package['library'], conversations=package['conversations'], code=package.get('code')))
                     raw_commit = git.run('cat-file', 'commit', oid, limit=MAX_METADATA_BYTES)
                     headers, _, body = raw_commit.partition(b'\n\n')
                     body = body.decode('utf-8', 'replace').strip()
