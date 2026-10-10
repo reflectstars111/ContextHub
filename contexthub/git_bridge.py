@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -148,7 +149,24 @@ def _init_git(directory, bare=False):
             args.append('--bare')
         args.append(str(directory))
         git.run(*args)
+    if not bare:
+        # Explicit --git-dir can make Git for Windows infer a bare repository.
+        # Exported repositories must remain usable with ordinary Git commands.
+        git.run('config', 'core.bare', 'false')
     return git
+
+
+def _remove_staged_readonly(function, path, error):
+    # Git marks pack/index files read-only on Windows. Only retry deletion of
+    # regular files in our own staging tree; propagate all other failures.
+    mode = os.lstat(path).st_mode
+    if (os.name == 'nt' and function is os.unlink and
+            isinstance(error, PermissionError) and stat.S_ISREG(mode) and
+            not mode & stat.S_IWRITE):
+        os.chmod(path, mode | stat.S_IWRITE)
+        function(path)
+        return
+    raise error
 
 
 @contextmanager
@@ -169,7 +187,7 @@ def _destination(destination):
             published = True
         finally:
             if not published:
-                shutil.rmtree(staged)
+                shutil.rmtree(staged, onexc=_remove_staged_readonly)
     finally:
         fs.close(parent)
 

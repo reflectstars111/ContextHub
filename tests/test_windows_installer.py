@@ -65,6 +65,20 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', errors='replace'))
         return result.stdout.decode('utf-8').strip()
 
+    def test_install_without_get_file_hash_function(self):
+        driver = self.root / 'without-file-hash.ps1'
+        driver.write_text('''$ErrorActionPreference = 'Stop'
+Import-Module -Assembly ([Reflection.Assembly]::LoadWithPartialName('Microsoft.PowerShell.Commands.Utility'))
+Import-Module Microsoft.PowerShell.Management
+$PSModuleAutoLoadingPreference = 'None'
+if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) { throw 'Fixture unexpectedly provides Get-FileHash' }
+& $env:CTX_TEST_INSTALLER -ArchivePath $env:CTX_TEST_ARCHIVE -Sha256 $env:CTX_TEST_SHA -InstallDir $env:CTX_TEST_DIR -PythonExecutable $env:CTX_TEST_PYTHON -NoPathUpdate
+''', encoding='ascii')
+        result = subprocess.run([POWERSHELL, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(driver)],
+                                env=self._environment(), capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode('utf-8', errors='replace'))
+        self.assertEqual(self.launcher('--version'), 'ContextHub 0.6.0')
+
     def test_install_and_update_in_unicode_space_directory_preserve_arguments(self):
         self.install()
         self.assertEqual(self.launcher('--version'), 'ContextHub 0.6.0')

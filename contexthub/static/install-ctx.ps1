@@ -189,7 +189,19 @@ try {
         $expected = $Matches[1]
         Receive-File ($origin + '/ctx.pyz') $newArchive 20971520
     }
-    $actual = (Get-FileHash -LiteralPath $newArchive -Algorithm SHA256).Hash
+    # PowerShell 5.1 launched by PowerShell 7 can lack the Get-FileHash
+    # script function even when utility cmdlets are available. Hash through
+    # .NET directly, retaining the same SHA-256 verification and closing both
+    # resources before archive replacement or rollback.
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    $hashStream = $null
+    try {
+        $hashStream = [IO.File]::OpenRead($newArchive)
+        $actual = [BitConverter]::ToString($hasher.ComputeHash($hashStream)).Replace('-', '')
+    } finally {
+        if ($hashStream) { $hashStream.Dispose() }
+        $hasher.Dispose()
+    }
     if ($actual -ine $expected) { throw 'SHA-256 checksum mismatch. Existing installation was not changed.' }
     $version = & $python $newArchive --version 2>&1
     if ($LASTEXITCODE -ne 0 -or @($version).Count -ne 1 -or

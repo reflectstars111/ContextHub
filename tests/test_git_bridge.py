@@ -161,6 +161,19 @@ class GitBridgeTests(unittest.TestCase):
 
 
 class DirectoryPublicationTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows read-only deletion semantics')
+    def test_failed_publication_cleans_read_only_git_files(self):
+        from contexthub.git_bridge import _destination
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'result'
+            with self.assertRaisesRegex(ValueError, 'original failure'):
+                with _destination(target) as (staged, destination):
+                    pack = staged / 'objects.pack'
+                    pack.write_bytes(b'packed objects')
+                    pack.chmod(0o400)
+                    raise ValueError('original failure')
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
     def test_publish_with_guarded_parent_and_unicode_paths(self):
         from contexthub.git_bridge import _destination
         with tempfile.TemporaryDirectory() as temporary:

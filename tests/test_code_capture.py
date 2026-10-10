@@ -45,9 +45,9 @@ class CodeCaptureTests(unittest.TestCase):
     def test_dirty_untracked_and_deleted_files_roundtrip_without_source_mutation(self):
         (self.repo / 'app.py').write_text('staged\n')
         self.git('add', 'app.py')
-        (self.repo / 'app.py').write_text('actual working bytes\n')
+        (self.repo / 'app.py').write_bytes(b'actual working bytes\n')
         (self.repo / 'new').mkdir()
-        (self.repo / 'new/untracked.py').write_text('print("new")\n')
+        (self.repo / 'new/untracked.py').write_bytes(b'print("new")\n')
         (self.repo / 'ignored').mkdir()
         (self.repo / 'ignored/private').write_text('ignored')
         (self.repo / '.gitignore').unlink()
@@ -79,6 +79,21 @@ class CodeCaptureTests(unittest.TestCase):
         self.assertTrue({'.env', 'credentials.json', 'code.json'} <=
                         {entry['path'] for entry in report['excluded']})
         self.assertEqual(report['captured_files'], 3)
+
+    def test_crlf_bytes_are_preserved_and_lfs_pointers_are_rejected(self):
+        data = b'actual Windows bytes\r\n'
+        (self.repo / 'app.py').write_bytes(data)
+        code = capture_code(self.repo)
+        self.assertEqual(self.files(code)['app.py'], data)
+        restore_code(code, self.root / 'crlf-restored')
+        self.assertEqual((self.root / 'crlf-restored/app.py').read_bytes(), data)
+        for newline in (b'\n', b'\r\n'):
+            with self.subTest(newline=newline):
+                (self.repo / 'app.py').write_bytes(newline.join([
+                    b'version https://git-lfs.github.com/spec/v1',
+                    b'oid sha256:' + b'a' * 64, b'size 100', b'']))
+                with self.assertRaises(CodeCaptureError):
+                    capture_code(self.repo)
 
     def test_unchanged_reuses_snapshot_changed_preserves_history_and_explicit_bindings(self):
         conversations = [{'id': 'conversation', 'messages': [{'id': 'old'}, {'id': 'latest'}]}]
@@ -147,7 +162,7 @@ class CodeCaptureTests(unittest.TestCase):
         self.assertNotIn('directory/removed.py', self.files(capture_code(self.repo)))
         worktree = self.root / 'linked'
         self.git('worktree', 'add', '-b', 'topic', str(worktree))
-        (worktree / 'app.py').write_text('linked dirty\n')
+        (worktree / 'app.py').write_bytes(b'linked dirty\n')
         code = capture_code(worktree)
         self.assertEqual(code['snapshots'][0]['branch'], 'topic')
         self.assertEqual(self.files(code)['app.py'], b'linked dirty\n')

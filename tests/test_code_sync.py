@@ -25,7 +25,7 @@ class CodeSyncTests(unittest.TestCase):
         self.repo.mkdir()
         self.git('init', '-b', 'main')
         self.git('config', 'core.autocrlf', 'false')
-        (self.repo / 'app.py').write_text('print("one")\n')
+        (self.repo / 'app.py').write_bytes(b'print("one")\n')
         self.git('add', '.'); self.git('commit', '-m', 'initial')
         self.ws = Workspace.init(self.root / 'conversations', 'Synthetic')
         self.ws.add(pack()); self.ws.commit('initial conversation')
@@ -150,9 +150,13 @@ class CodeSyncTests(unittest.TestCase):
         self.assertEqual((self.target / 'code/app.py').read_text(), 'print("one")\n')
 
     def test_lfs_is_not_claimed_as_complete(self):
-        (self.repo / 'large').write_text('version https://git-lfs.github.com/spec/v1\noid sha256:' + 'a' * 64 + '\nsize 100\n')
-        self.git('add', '.'); self.git('commit', '-m', 'lfs')
-        with self.assertRaises(CodeSyncError): self.capture()
+        for newline in (b'\n', b'\r\n'):
+            with self.subTest(newline=newline):
+                (self.repo / 'large').write_bytes(newline.join([
+                    b'version https://git-lfs.github.com/spec/v1',
+                    b'oid sha256:' + b'a' * 64, b'size 100', b'']))
+                self.git('add', '.'); self.git('commit', '-m', 'lfs')
+                with self.assertRaises(CodeSyncError): self.capture()
 
     @unittest.skipIf(os.name == 'nt', 'POSIX symlink fixture')
     def test_symlink_code_rejected(self):

@@ -136,7 +136,8 @@ def _read_work_file(root, path, tracked_mode=None):
                 or (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
                    (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
             raise CodeCaptureError('采集期间代码文件发生变化，请重试：' + path)
-        if data.startswith(b'version https://git-lfs.github.com/spec/v1\n'):
+        if data.startswith((b'version https://git-lfs.github.com/spec/v1\n',
+                            b'version https://git-lfs.github.com/spec/v1\r\n')):
             raise CodeCaptureError('代码快照需要 Git LFS 的实际文件内容，不能保存指针：' + path)
         mode = (tracked_mode or '100644') if os.name == 'nt' else (
             '100755' if before.st_mode & 0o111 else '100644')

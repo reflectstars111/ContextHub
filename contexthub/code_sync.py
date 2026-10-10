@@ -203,7 +203,8 @@ def _contents(git, files):
     for path, mode, oid in files:
         data = git.blob(oid, min(_MAX_FILE, _MAX_BYTES - total))
         total += len(data)
-        if data.startswith(b'version https://git-lfs.github.com/spec/v1\n'):
+        if data.startswith((b'version https://git-lfs.github.com/spec/v1\n',
+                            b'version https://git-lfs.github.com/spec/v1\r\n')):
             raise CodeSyncError('同步恢复暂不支持 Git LFS 指针；需要完整的普通 Git 文件')
         yield path, mode, data
 
