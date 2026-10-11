@@ -13,6 +13,76 @@ function versionURL(id, version) {
   if (version) url.searchParams.set("version", version);
   return url;
 }
+const READER_TABS = Object.freeze({ conversation: "conversation-section", code: "code-browser-panel", history: "version-history-panel", contributions: "package-contributions-panel", settings: "library-settings" });
+const readerLocationState = { request: 0, lastURL: null };
+function readerLocationURL() {
+  const data = state.reader;
+  if (state.mode !== "hub" || !data || data.kind !== "hub" || !data.id || !(data.version && data.version.id)) return null;
+  const url = versionURL(data.id, data.version.id);
+  const tab = Object.keys(READER_TABS).find((name) => READER_TABS[name] === $("reader-view").dataset.repositoryTab) || "conversation";
+  if (tab !== "conversation") url.searchParams.set("tab", tab);
+  const conversation = currentConversation();
+  if (conversation) {
+    url.searchParams.set("conversation", conversation.id);
+    if (state.turnKey !== null) url.searchParams.set("turn", state.turnKey);
+    if (state.turnPage > 0) url.searchParams.set("page", String(state.turnPage + 1));
+  }
+  if (typeof codeBrowser !== "undefined" && codeBrowser.snapshot) {
+    url.searchParams.set("snapshot", codeBrowser.snapshot);
+    const path = codeBrowser.file || codeBrowser.directory;
+    if (path) url.searchParams.set("path", path);
+    if (codeBrowser.tab === "diff") url.searchParams.set("codeview", "diff");
+    if (codeBrowser.origin && conversation && codeBrowser.origin.conversation_id === conversation.id) url.searchParams.set("message", codeBrowser.origin.message_id);
+  }
+  return url;
+}
+function updateReaderLocation({ replace = false } = {}) {
+  if (state.view !== "reader") return;
+  const url = readerLocationURL();
+  if (!url) return;
+  // A user selection supersedes an older asynchronous file/location restoration.
+  readerLocationState.request++;
+  readerLocationState.lastURL = url.href;
+  if (url.href !== window.location.href) window.history[replace ? "replaceState" : "pushState"](null, "", url);
+}
+async function applyReaderLocation(parameters) {
+  const data = state.reader;
+  if (!data || data.kind !== "hub") return;
+  const request = ++readerLocationState.request;
+  const params = new URLSearchParams(parameters);
+  const warnings = [];
+  for (const name of ["tab", "conversation", "turn", "page", "snapshot", "path", "codeview", "message"]) {
+    if (params.getAll(name).length > 1) warnings.push("链接含有重复的位置参数，已使用第一项。");
+  }
+  $("turn-search").value = "";
+  const conversations = data.conversations || [];
+  const index = params.has("conversation") ? conversations.findIndex((conversation) => conversation.id === params.get("conversation")) : 0;
+  state.conversationIndex = index >= 0 ? index : 0;
+  if (params.has("conversation") && index < 0) warnings.push("链接指定的对话不在此版本中，已显示可用对话。");
+  const turns = conversationTurns(currentConversation() || { messages: [] });
+  const selected = params.has("turn") ? turns.find((turn) => turn.key === params.get("turn")) : turns.at(-1);
+  const turn = selected || turns.at(-1);
+  if (params.has("turn") && !selected) warnings.push("链接指定的轮次不在当前对话中，已显示最后一轮。");
+  state.turnKey = turn ? turn.key : null;
+  state.turnPage = 0;
+  if (params.has("page")) {
+    const value = params.get("page"), page = Number(value);
+    const pages = turn ? Math.ceil(turn.entries.length / 20) : 0;
+    if (/^[1-9]\d*$/.test(value) && Number.isSafeInteger(page) && page <= pages && (!params.has("turn") || selected)) state.turnPage = page - 1;
+    else warnings.push("链接指定的消息页不存在，已显示本轮第一页。");
+  }
+  renderConversationTabs(); renderConversation();
+  const tab = params.has("tab") ? params.get("tab") : "conversation";
+  if (!Object.hasOwn(READER_TABS, tab) || !setRepositorySection(READER_TABS[tab])) {
+    setRepositorySection(READER_TABS.conversation);
+    warnings.push("链接指定的页面不可用，已返回对话页面。");
+  }
+  if (typeof applyCodeLocation === "function") warnings.push(...await applyCodeLocation(params));
+  if (request !== readerLocationState.request || state.reader !== data || state.view !== "reader") return;
+  if (typeof renderRepositoryRestore === "function") renderRepositoryRestore();
+  updateReaderLocation({ replace: true });
+  if (warnings.length) showStatus([...new Set(warnings)].join(" "), "warning");
+}
 function updateVersionURL(data, replace = false) {
   if (state.mode !== "hub" || !data.id) return;
   const url = versionURL(data.id, data.version && data.version.id);
@@ -79,7 +149,6 @@ function renderVersionWorkspace(data) {
   if (!draft) {
     $("compare-panel").hidden = true;
     $("version-comparison").replaceChildren();
-    updateVersionURL(data);
     perform(() => loadVersions(data));
     perform(() => checkStoredDraft(data));
   }
@@ -411,17 +480,28 @@ function bindVersionEvents() {
   $("fork-package").addEventListener("click", () => openForkDialog());
   $("fork-form").addEventListener("submit", submitFork);
   document.querySelectorAll('input[name="fork-visibility"]').forEach((radio) => radio.addEventListener("change", updateForkLabel));
-  $("compare-versions").addEventListener("click", () => { setRepositorySection("version-history-panel"); $("compare-panel").hidden = false; perform(compareVersions); });
+  $("compare-versions").addEventListener("click", () => { setRepositorySection("version-history-panel", { history: true }); $("compare-panel").hidden = false; perform(compareVersions); });
   $("close-comparison").addEventListener("click", () => { $("compare-panel").hidden = true; });
   $("run-comparison").addEventListener("click", () => perform(compareVersions));
-  window.addEventListener("beforeunload", (event) => { if (isDraft() && !draftSynced()) { event.preventDefault(); event.returnValue = ""; } });
+  window.addEventListener("beforeunload", (event) => { if ($("messages").querySelector("textarea") || isDraft() && !draftSynced()) { event.preventDefault(); event.returnValue = ""; } });
   window.addEventListener("popstate", () => perform(async () => {
     if (state.mode !== "hub") return;
     const current = state.reader;
-    if (!requireSavedEditor() || !leaveDraft()) { if (current && current.id) updateVersionURL(current); else if (contributionState.current && state.view === "contribution") updateContributionURL(contributionState.current.id); return; }
+    const wasDraft = isDraft();
+    if (!requireSavedEditor() || !leaveDraft()) {
+      const previous = readerLocationState.lastURL;
+      if (state.view === "reader" && previous) window.history.pushState(null, "", previous);
+      else if (contributionState.current && state.view === "contribution") updateContributionURL(contributionState.current.id);
+      return;
+    }
+    state.readerRequest++;
+    readerLocationState.request++;
     const parameters = new URLSearchParams(window.location.search);
     if (parameters.has("contribution")) await loadContribution(parameters.get("contribution"));
-    else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
+    else if (parameters.has("package")) {
+      if (!wasDraft && state.view === "reader" && current && current.kind === "hub" && parameters.get("package") === current.id && parameters.get("version") === (current.version || {}).id) await applyReaderLocation(parameters);
+      else await loadPackage(parameters.get("package"), parameters.get("version"), { location: parameters, replace: true });
+    }
     else navigate("library");
   }));
 }

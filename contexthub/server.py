@@ -409,6 +409,7 @@ class Handler(BaseHTTPRequestHandler):
                               {'Content-Disposition': 'attachment; filename="ctx.pyz"'})
         allowed = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/versions.js': 'versions.js', '/contributions.js': 'contributions.js', '/drafts.js': 'drafts.js', '/lifecycle.js': 'lifecycle.js', '/style.css': 'style.css', '/cli': 'cli.html', '/cli.css': 'cli.css'}
         allowed['/code-browser.js'] = 'code-browser.js'
+        allowed['/codex-open.js'] = 'codex-open.js'
         allowed.update({'/repository.css': 'repository.css', '/repository.js': 'repository.js'})
         if path not in allowed:
             raise HTTPError(404, '未找到页面')

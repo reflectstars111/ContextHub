@@ -1,7 +1,7 @@
 "use strict";
 
 // File and diff requests are always pinned to the version open in the reader.
-const codeBrowser = { key: null, snapshot: null, directory: "", request: 0, tab: "files", diffLoaded: null };
+const codeBrowser = { key: null, snapshot: null, directory: "", file: null, origin: null, request: 0, tab: "files", diffLoaded: null };
 function portableCodeSummary(code) {
   return code ? structuredClone(Object.fromEntries(Object.entries(code).filter(([key]) => key !== "blobs"))) : null;
 }
@@ -19,11 +19,11 @@ function codeEndpoint(kind, extra = {}) {
 }
 function renderCodeRepository(data) {
   const code = data.code, snapshots = code && Array.isArray(code.snapshots) ? code.snapshots : [];
-  const key = `${data.id || "local"}:${data.version && data.version.id || ""}:${data.kind}:${JSON.stringify(code || null)}`;
+  const key = `${data.id || "local"}:${data.version && data.version.id || ""}:${data.kind}:${Object.hasOwn(data, "codeReplacement")}:${JSON.stringify(code || null)}`;
   if (key === codeBrowser.key) return;
   codeBrowser.key = key; codeBrowser.request++; codeBrowser.diffLoaded = null;
   codeBrowser.snapshot = code && code.head || (snapshots.at(-1) || {}).id || null;
-  codeBrowser.directory = "";
+  codeBrowser.directory = ""; codeBrowser.file = null; codeBrowser.origin = null;
   const select = $("code-snapshot-select"); select.replaceChildren();
   snapshots.forEach((snapshot, index) => {
     const option = node("option", "", `${index + 1} · ${formatDate(snapshot.created_at)} · ${String(snapshot.id).slice(0, 12)}`);
@@ -45,12 +45,16 @@ function renderCodeSnapshot() {
     if (snapshot.git_commit) summary.append(node("code", "", `Git ${snapshot.git_commit.slice(0, 12)}`));
     summary.append(node("span", "", snapshot.created_at ? new Date(snapshot.created_at).toLocaleString("zh-CN") : "时间未记录"));
   }
-  renderCodeTree();
+  renderCodeTree(); codeSelectionChanged();
+}
+function codeSelectionChanged() {
+  renderCodeOrigin();
+  if (typeof renderRepositoryRestore === "function") renderRepositoryRestore();
 }
 function renderCodeTree() {
   const tree = $("code-tree"), crumbs = $("code-breadcrumb"), snapshot = codeSnapshot(); tree.replaceChildren(); crumbs.replaceChildren();
   if (!snapshot) return;
-  const changeDirectory = (path) => { codeBrowser.directory = path; codeBrowser.request++; $("code-file").replaceChildren(); renderCodeTree(); };
+  const changeDirectory = (path) => { codeBrowser.directory = path; codeBrowser.file = null; codeBrowser.request++; $("code-file").replaceChildren(); renderCodeTree(); codeSelectionChanged(); updateReaderLocation(); };
   crumbs.append(action("仓库根目录", "text-button", () => changeDirectory("")));
   let current = "";
   for (const segment of codeBrowser.directory.split("/").filter(Boolean)) {
@@ -69,14 +73,22 @@ function renderCodeTree() {
     tree.append(action("↰ 上一级", "code-tree-row", () => changeDirectory(parent ? parent + "/" : "")));
   }
   for (const file of [...entries.values()].sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name))) {
-    const row = action("", "code-tree-row", () => file.directory ? changeDirectory(file.path) : perform(() => openCodeFile(file.path)));
+    const row = action("", "code-tree-row", () => file.directory ? changeDirectory(file.path) : perform(() => openCodeFile(file.path, { history: true })));
     row.dataset.path = file.path;
     row.disabled = !file.directory && Object.hasOwn(state.reader, "codeReplacement");
     row.append(node("span", "code-entry-name", `${file.directory ? "▸" : "▤"} ${file.name}`), node("span", "code-entry-size", file.directory ? "目录" : `${file.size} B`)); tree.append(row);
   }
   if (!entries.size) tree.append(node("p", "field-help", "此目录没有文件。"));
 }
-async function openCodeFile(path) {
+async function openCodeFile(path, { history = false } = {}) {
+  if (!(codeSnapshot()?.files || []).some((file) => file.path === path)) {
+    $("code-file").replaceChildren(node("p", "notice", "所选代码快照中没有这个文件。"));
+    return;
+  }
+  codeBrowser.file = path;
+  codeBrowser.directory = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+  renderCodeTree(); codeSelectionChanged();
+  if (history) updateReaderLocation();
   const request = ++codeBrowser.request, key = codeBrowser.key, snapshot = codeBrowser.snapshot;
   const box = $("code-file"); box.replaceChildren(node("p", "field-help", "正在读取文件…"));
   try {
@@ -91,11 +103,16 @@ async function openCodeFile(path) {
     if (request === codeBrowser.request && key === codeBrowser.key) box.replaceChildren(node("p", "notice error", errorMessage(error)));
   }
 }
-function setCodeTab(tab) {
-  codeBrowser.tab = tab;
+function setCodeTab(tab, { history = false } = {}) {
+  codeBrowser.request++;
+  codeBrowser.tab = tab === "diff" && !Object.hasOwn(state.reader || {}, "codeReplacement") ? "diff" : "files";
+  tab = codeBrowser.tab;
   $("code-files-panel").hidden = tab !== "files"; $("code-diff-panel").hidden = tab !== "diff";
   $("code-files-tab").setAttribute("aria-pressed", String(tab === "files")); $("code-diff-tab").setAttribute("aria-pressed", String(tab === "diff"));
-  if (tab === "diff" && codeSnapshot()) perform(loadCodeDiff);
+  codeSelectionChanged();
+  if (history) updateReaderLocation();
+  if (tab === "diff" && codeSnapshot()) return perform(loadCodeDiff);
+  if (tab === "files" && codeBrowser.file) return perform(() => openCodeFile(codeBrowser.file));
 }
 async function loadCodeDiff() {
   const marker = codeBrowser.key + ":" + codeBrowser.snapshot;
@@ -128,24 +145,89 @@ function renderCodeComparison(box, diff) {
     if (!(diff.files || []).length) box.append(node("p", "field-help", diff.changed ? "文件内容一致，代码快照或消息关联记录发生变化。" : "代码与上一快照一致。"));
     if (diff.truncated) box.append(node("p", "notice", "差异较大，当前仅显示部分内容。"));
 }
-function showMessageCode(snapshotId) {
+// URL input is untrusted: only paths and snapshots present in the open package are used.
+async function applyCodeLocation(params) {
+  const warnings = [], code = codeSummary(), snapshots = code?.snapshots || [];
+  const requestedSnapshot = params.get("snapshot"), requestedPath = params.get("path");
+  const requestedTab = params.get("codeview"), messageId = params.get("message");
+  const defaultSnapshot = snapshots.find((item) => item.id === code?.head) || snapshots.at(-1);
+  let selected = requestedSnapshot ? snapshots.find((item) => item.id === requestedSnapshot) : defaultSnapshot;
+  if (requestedSnapshot && !selected) {
+    warnings.push("链接中的代码快照不存在，已显示本版本的默认快照。"); selected = defaultSnapshot;
+  }
+  codeBrowser.origin = null;
+  if (messageId) {
+    const conversation = currentConversation();
+    const binding = conversation && conversation.id === params.get("conversation") && (conversation.messages || []).some((message) => message.id === messageId)
+      && (code?.bindings || []).find((item) => item.conversation_id === conversation.id && item.message_id === messageId);
+    if (binding && !requestedSnapshot) selected = snapshots.find((item) => item.id === binding.snapshot_id) || selected;
+    if (binding && selected?.id === binding.snapshot_id) codeBrowser.origin = { conversation_id: conversation.id, message_id: messageId };
+    else warnings.push("链接中的消息与所选代码快照没有有效关联，已移除来源定位。");
+  }
+  codeBrowser.snapshot = selected?.id || null; codeBrowser.directory = ""; codeBrowser.file = null;
+  $("code-snapshot-select").value = codeBrowser.snapshot || "";
+  if (requestedPath) {
+    if (requestedPath.endsWith("/") && (selected?.files || []).some((file) => file.path.startsWith(requestedPath))) codeBrowser.directory = requestedPath;
+    else if ((selected?.files || []).some((file) => file.path === requestedPath)) {
+      codeBrowser.file = requestedPath;
+      codeBrowser.directory = requestedPath.includes("/") ? requestedPath.slice(0, requestedPath.lastIndexOf("/") + 1) : "";
+    } else warnings.push("链接中的代码路径不存在，已返回快照根目录。");
+  }
+  if (requestedTab && !["files", "diff"].includes(requestedTab)) warnings.push("链接中的代码视图无效，已显示文件目录。");
+  let tab = requestedTab === "diff" ? "diff" : "files";
+  if (Object.hasOwn(state.reader || {}, "codeReplacement")) {
+    if (codeBrowser.file || tab === "diff") warnings.push("候选代码尚未发布，当前仅显示候选文件目录。");
+    codeBrowser.file = null; tab = "files";
+  }
+  renderCodeSnapshot();
+  await setCodeTab(tab);
+  return warnings;
+}
+function renderCodeOrigin() {
+  const box = $("code-origin"); if (!box) return;
+  box.replaceChildren(); box.hidden = true;
+  const origin = codeBrowser.origin;
+  if (!origin) return;
+  const conversation = (state.reader?.conversations || []).find((item) => item.id === origin.conversation_id);
+  const turn = conversation && conversationTurns(conversation).find((item) => item.entries.some(({ message }) => message.id === origin.message_id));
+  const binding = (codeSummary()?.bindings || []).find((item) => item.conversation_id === origin.conversation_id && item.message_id === origin.message_id && item.snapshot_id === codeBrowser.snapshot);
+  if (!turn || !binding) { codeBrowser.origin = null; return; }
+  box.hidden = false;
+  box.append(node("span", "", `来自「${conversation.title || "未命名对话"}」· 第 ${turn.number} 轮`));
+  box.append(node("p", "field-help", "此关联表示消息采集时的代码状态；下方差异是两个代码快照之间的变化，不代表这条消息单独产生的修改。"));
+  box.append(action("返回来源消息", "text-button", () => {
+    if (!requireSavedEditor()) return;
+    state.conversationIndex = state.reader.conversations.indexOf(conversation);
+    selectConversationMessage(conversation, origin.message_id);
+    renderConversationTabs(); renderConversation();
+    setRepositorySection("conversation-section", { focus: true, history: false });
+    updateReaderLocation();
+    const section = [...$("messages").querySelectorAll(".message")].find((item) => item.dataset.messageId === origin.message_id);
+    if (section) { section.setAttribute("tabindex", "-1"); section.scrollIntoView({ block: "center" }); section.focus({ preventScroll: true }); }
+  }));
+}
+function showMessageCode(snapshotId, conversationId, messageId) {
   if (!requireSavedEditor()) return;
-  if (!(codeSummary().snapshots || []).some((snapshot) => snapshot.id === snapshotId)) return;
-  codeBrowser.snapshot = snapshotId; codeBrowser.directory = "";
+  const code = codeSummary();
+  const binding = (code?.bindings || []).find((item) => item.conversation_id === conversationId && item.message_id === messageId && item.snapshot_id === snapshotId);
+  if (!binding || !(code.snapshots || []).some((snapshot) => snapshot.id === snapshotId)) return;
+  codeBrowser.snapshot = snapshotId; codeBrowser.directory = ""; codeBrowser.file = null;
+  codeBrowser.origin = { conversation_id: conversationId, message_id: messageId };
   $("code-snapshot-select").value = snapshotId; renderCodeSnapshot(); setCodeTab(Object.hasOwn(state.reader, "codeReplacement") ? "files" : "diff");
-  setRepositorySection("code-browser-panel", { focus: true });
+  setRepositorySection("code-browser-panel", { focus: true, history: false });
+  updateReaderLocation();
   const panel = $("code-browser-panel"); panel.scrollIntoView({ block: "start" }); panel.setAttribute("tabindex", "-1"); panel.focus({ preventScroll: true });
 }
 function renderMessageCode(section, conversation, message) {
   const code = codeSummary(), line = node("div", "message-code-link");
   const binding = code && (code.bindings || []).find((item) => item.conversation_id === conversation.id && item.message_id === message.id);
   if (binding && (code.snapshots || []).some((item) => item.id === binding.snapshot_id)) {
-    line.append(action(`采集时的代码 · ${binding.snapshot_id.slice(0, 12)}`, "text-button", () => showMessageCode(binding.snapshot_id)));
+    line.append(action(`采集时的代码 · ${binding.snapshot_id.slice(0, 12)}`, "text-button", () => showMessageCode(binding.snapshot_id, conversation.id, message.id)));
   } else line.append(node("span", "", "未记录当时代码"));
   section.append(line);
 }
 document.addEventListener("DOMContentLoaded", () => {
-  $("code-snapshot-select").addEventListener("change", () => { codeBrowser.snapshot = $("code-snapshot-select").value; codeBrowser.directory = ""; renderCodeSnapshot(); setCodeTab(codeBrowser.tab); });
-  $("code-files-tab").addEventListener("click", () => setCodeTab("files"));
-  $("code-diff-tab").addEventListener("click", () => setCodeTab("diff"));
+  $("code-snapshot-select").addEventListener("change", () => { codeBrowser.snapshot = $("code-snapshot-select").value; codeBrowser.directory = ""; codeBrowser.file = null; codeBrowser.origin = null; renderCodeSnapshot(); setCodeTab(codeBrowser.tab, { history: true }); });
+  $("code-files-tab").addEventListener("click", () => setCodeTab("files", { history: true }));
+  $("code-diff-tab").addEventListener("click", () => setCodeTab("diff", { history: true }));
 });

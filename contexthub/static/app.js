@@ -217,6 +217,7 @@ function empty(container, title, description, buttonText, handler) {
 }
 function navigate(view) {
   if (state.view === "reader" && view !== "reader" && (!requireSavedEditor() || !leaveDraft())) return false;
+  if (view !== "reader" && typeof closeCodexDialog === "function") closeCodexDialog();
   rememberContributionComment();
   if (view !== "contribution") invalidateContributionReads();
   if (view !== "reader") { contributionState.listRequest++; state.readerRequest++; }
@@ -292,18 +293,33 @@ async function loadPackages() {
     }
   } finally { if (request === state.packageRequest) $("package-grid").removeAttribute("aria-busy"); }
 }
-async function loadPackage(id, version = null) {
+async function loadPackage(id, version = null, { location = null, replace = false } = {}) {
   if (!requireSavedEditor() || !leaveDraft()) return;
   rememberContributionComment();
   invalidateContributionReads();
   const request = ++state.readerRequest;
   clearStatus();
-  const pack = await api(`/api/packages/${encodeURIComponent(id)}${version ? `?version=${encodeURIComponent(version)}` : ""}`);
+  let pack;
+  try { pack = await api(`/api/packages/${encodeURIComponent(id)}${version ? `?version=${encodeURIComponent(version)}` : ""}`); }
+  catch (error) {
+    if (request !== state.readerRequest) return;
+    // Failed history navigation must not label old content with a different
+    // version's address. Initial private links stay available for login.
+    if (location && state.view === "reader" && state.reader && state.reader.kind === "hub") {
+      const previous = readerLocationState.lastURL ? new URL(readerLocationState.lastURL).searchParams : null;
+      openReader(state.reader, { location: previous, replace: true });
+      const recovery = state.readerRequest;
+      if (previous) await applyReaderLocation(previous);
+      if (recovery !== state.readerRequest) return;
+    }
+    throw error;
+  }
   if (request !== state.readerRequest) return;
   if (isDraft() && (!requireSavedEditor() || !leaveDraft())) return;
-  openReader({ ...pack, id: pack.id || id, kind: "hub" });
+  openReader({ ...pack, id: pack.id || id, kind: "hub" }, { location, replace });
+  if (location) await applyReaderLocation(location);
 }
-function openReader(data) {
+function openReader(data, { location = null, replace = false } = {}) {
   // Any reader transition supersedes earlier asynchronous package and proposal reads.
   rememberContributionComment();
   invalidateContributionReads();
@@ -336,6 +352,7 @@ function openReader(data) {
   renderConversation();
   renderVersionWorkspace(data);
   navigate("reader");
+  if (!location) updateReaderLocation({ replace });
 }
 function renderConversationTabs() {
   const tabs = $("conversation-tabs");
@@ -345,7 +362,11 @@ function renderConversationTabs() {
       if (!requireSavedEditor()) return;
       state.conversationIndex = index;
       state.turnKey = null; state.turnPage = 0; $("turn-search").value = "";
-      renderConversationTabs(); renderConversation();
+      if (typeof codeBrowser !== "undefined" && codeBrowser.origin && codeBrowser.origin.conversation_id !== conversation.id) {
+        codeBrowser.origin = null;
+        if (typeof renderCodeOrigin === "function") renderCodeOrigin();
+      }
+      renderConversationTabs(); renderConversation(); updateReaderLocation();
     });
     tab.append(node("span", "", conversation.title || `对话 ${index + 1}`), node("small", "", `${isSourceArchive(conversation) ? "原文存档 · " : ""}${(conversation.messages || []).length} 条消息`));
     tab.setAttribute("aria-pressed", String(index === state.conversationIndex));
@@ -404,7 +425,7 @@ function renderTurnDirectory(conversation) {
   let day = null, group = null;
   const choose = (turn) => {
     if (!requireSavedEditor()) return;
-    state.turnKey = turn.key; state.turnPage = 0; renderConversation();
+    state.turnKey = turn.key; state.turnPage = 0; renderConversation(); updateReaderLocation();
   };
   for (const turn of matches) {
     const date = turn.date ? turn.date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }) : "时间未记录";
@@ -427,8 +448,8 @@ function renderTurnDirectory(conversation) {
   previous.disabled = position === 0; next.disabled = position === matches.length - 1;
   navigation.append(previous, node("span", "turn-position", `第 ${selected.number} / ${turns.length} 轮 · ${selected.entries.length} 条消息`), next);
   if (pages > 1) {
-    const older = action("较早消息", "button button-small", () => { if (requireSavedEditor()) { state.turnPage--; renderConversation(); } });
-    const newer = action("较新消息", "button button-small", () => { if (requireSavedEditor()) { state.turnPage++; renderConversation(); } });
+    const older = action("较早消息", "button button-small", () => { if (requireSavedEditor()) { state.turnPage--; renderConversation(); updateReaderLocation(); } });
+    const newer = action("较新消息", "button button-small", () => { if (requireSavedEditor()) { state.turnPage++; renderConversation(); updateReaderLocation(); } });
     older.disabled = state.turnPage === 0; newer.disabled = state.turnPage === pages - 1;
     navigation.append(older, node("span", "field-help", `本轮第 ${state.turnPage + 1} / ${pages} 页`), newer);
   }
@@ -448,7 +469,7 @@ function renderConversation() {
   $("save-archive").disabled = !archive || (conversation.messages || []).length !== 1;
   const editedArchive = archive && (conversation.messages || []).some((message) => (message.transformations || []).some((change) => change === "human_edited" || change && (change.kind === "human_edited" || change.type === "human_edited")));
   $("save-archive").textContent = editedArchive ? "下载当前存档文本" : "下载存档文本";
-  if (!conversation) { $("turn-directory").replaceChildren(); $("turn-navigation").replaceChildren(); empty(messages, "没有对话内容", "此对话包未包含可阅读的对话。"); return; }
+  if (!conversation) { $("turn-directory").replaceChildren(); $("turn-navigation").replaceChildren(); empty(messages, "没有对话内容", "此对话包未包含可阅读的对话。"); if (typeof renderRepositoryRestore === "function") renderRepositoryRestore(); return; }
   const sourceLine = node("div", "conversation-source");
   sourceLine.append(node("span", "platform-badge", `声明来源：${platformLabel(conversationPlatform(conversation))}`));
   if (archive) sourceLine.append(node("span", "archive-badge", "原文存档"));
@@ -501,6 +522,7 @@ function renderConversation() {
   });
   if (!(conversation.messages || []).length) empty(messages, "没有可显示的消息", "请查看兼容性说明；如果消息被移除，可以返回列表重新预览原始会话。");
   renderDraftConversation(conversation);
+  if (typeof renderRepositoryRestore === "function") renderRepositoryRestore();
 }
 function requireSavedEditor() {
   const editor = $("messages").querySelector("textarea");
@@ -742,7 +764,7 @@ async function submitAuth(event) {
     else if (!intent.next && !state.reader) {
       const parameters = new URLSearchParams(window.location.search);
       if (parameters.has("contribution")) await loadContribution(parameters.get("contribution"));
-      else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
+      else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"), { location: parameters, replace: true });
     }
   } catch (error) {
     if (isCurrentAuthIntent(intent)) inlineError("auth-error", error);
@@ -1003,7 +1025,7 @@ function renderReceipt(data) {
 function bindEvents() {
   $("turn-search").addEventListener("input", () => {
     if (!requireSavedEditor()) return;
-    state.turnPage = 0; renderConversation();
+    state.turnPage = 0; renderConversation(); updateReaderLocation({ replace: true });
   });
   bindVersionEvents();
   bindContributionEvents();
@@ -1073,7 +1095,7 @@ async function initialize() {
       navigate("library");
       await loadPackages();
       if (parameters.has("contribution")) await loadContribution(parameters.get("contribution"));
-      else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"));
+      else if (parameters.has("package")) await loadPackage(parameters.get("package"), parameters.get("version"), { location: parameters, replace: true });
     }
   } catch (error) {
     showStatus(errorMessage(error), "error");

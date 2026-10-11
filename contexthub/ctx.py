@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import urllib.parse
 from pathlib import Path
 
@@ -102,6 +103,18 @@ def parser():
     command.add_argument('directory', nargs='?')
     command.add_argument('--hub')
     command.add_argument('--version', help='克隆指定的 Hub 历史版本')
+    command = sub.add_parser('open', help='从网页固定版本链接，一步恢复代码与对话并可导入本机 Codex')
+    command.add_argument('repository', help='含 version 的网页链接，或配合 --version 使用仓库 ID')
+    command.add_argument('--to', required=True, help='不存在的项目目标目录')
+    command.add_argument('--hub')
+    command.add_argument('--version', help='固定的 Hub 版本 ID')
+    command.add_argument('--codex', action='store_true', help='同时导入为本机 Codex 新会话，不自动调用模型')
+    command.add_argument('--conversation', help='选择要导入的对话 ID')
+    selection = command.add_mutually_exclusive_group()
+    selection.add_argument('--snapshot', help='恢复包内指定的代码快照')
+    selection.add_argument('--message', help='恢复指定消息关联的代码；导入 Codex 时截断至此消息')
+    command.add_argument('--mode', choices=('timeline', 'context'), default='timeline')
+    command.add_argument('--resume', action='store_true', help='核验已完成的同一次恢复，不重复创建 Codex 会话')
     command = sub.add_parser('fork', help='Fork 为自己的仓库并下载到新目录')
     command.add_argument('repository')
     command.add_argument('directory', nargs='?')
@@ -330,6 +343,61 @@ def _clone(args):
     return {'directory': str(ws.root), 'remote': ws.remote, 'status': ws.status()}
 
 
+def _open(args):
+    """Download once, restore a verified pair, and discard the transfer workspace.
+
+    The extra commit is a deterministic transfer identity, not development
+    history. Its fixed metadata lets restore's existing receipt checks work
+    when a retry creates a fresh temporary clone. The origin and immutable Hub
+    IDs are part of that identity, so a different source cannot reuse a receipt
+    merely because it serves identical package bytes.
+    """
+    from .code_sync import CodeSyncError, NativeRestoreError, restore_embedded
+
+    try:
+        origin, ident, version = clone_reference(args.repository, args.hub, args.version)
+    except ValueError as exc:
+        raise ValueError(f'{exc}；可在网页“在本机 Codex 中继续”中复制完整命令') from exc
+    if version is None:
+        raise ValueError('ctx open 需要固定版本；请使用含 version 的网页链接，或添加 --version VERSION_ID')
+    destination = Path(os.path.abspath(Path(args.to).expanduser()))
+    if os.path.lexists(destination) and not args.resume:
+        raise ValueError('目标目录必须不存在；已有恢复可用相同命令添加 --resume 核验，不会覆盖现有文件')
+    if args.resume and not os.path.lexists(destination):
+        raise ValueError('--resume 仅用于核验已有完整恢复目录')
+    with tempfile.TemporaryDirectory(prefix='contexthub-open-') as temporary:
+        downloaded = _clone(argparse.Namespace(action='clone', repository=ident, hub=origin,
+                                               version=version, directory=str(Path(temporary) / 'download')))
+        workspace = Workspace(downloaded['directory'])
+        with workspace.locked():
+            blob = workspace.package_bytes()
+            if not read_package(blob).get('code'):
+                raise CodeSyncError('此版本没有携带代码，不能恢复完整项目。请在网页下载对话包，再用 '
+                                    'ctx codex import 文件.contextpack --cwd 已有项目目录 导入对话')
+            record = workspace._save_commit(
+                blob, f'ContextHub open v1\n{origin}/?package={ident}&version={version}',
+                None, created_at='1970-01-01T00:00:00+00:00')
+        try:
+            result = restore_embedded(workspace, record['id'], destination,
+                                      snapshot=args.snapshot, message=args.message,
+                                      conversation=args.conversation, codex=args.codex,
+                                      mode=args.mode, resume=args.resume)
+        except NativeRestoreError as exc:
+            raise NativeRestoreError(f'{exc}；恢复回执：{destination / "receipt.json"}', exc.receipt) from exc
+    result.update(code_directory=str(destination / 'code'),
+                  conversations_directory=str(destination / 'conversations'),
+                  receipt_path=str(destination / 'receipt.json'),
+                  source={'hub': origin, 'package_id': ident, 'version_id': version})
+    if result.get('native_status') == 'complete':
+        thread = result.get('native_receipt', {}).get('thread_id')
+        if isinstance(thread, str) and _IDENTIFIER.fullmatch(thread) and not thread.startswith('-'):
+            result['resume_command'] = ('codex resume -C ' + quote_argument(destination / 'code')
+                                        + ' ' + quote_argument(thread))
+        else:
+            result.setdefault('warnings', []).append('Codex 回执缺少可用的会话 ID，请检查 receipt.json')
+    return result
+
+
 def _push(ws, args):
     with ws.locked():
         status = ws.status()
@@ -439,6 +507,8 @@ def run(args):
         return {'directory': str(ws.root), 'status': ws.status()}
     if args.action in ('clone', 'fork'):
         return _clone(args)
+    if args.action == 'open':
+        return _open(args)
     if args.action == 'git' and args.git_action == 'import':
         from .git_bridge import import_git
         return import_git(args.repository, args.directory)
@@ -526,6 +596,18 @@ def _display(args, value):
             print(_safe(f'提示：{warning}'))
         if value['import_report']['requires_confirmation']:
             print('接受这些提示后，可在 ctx add 时添加 --confirm-import。')
+    elif args.action == 'open':
+        print('已核验已有恢复，没有重复导入。' if value['resumed'] else '已恢复代码与完整对话包。')
+        print(_safe(f"代码目录：{value['code_directory']}"))
+        print(_safe(f"对话目录：{value['conversations_directory']}"))
+        print(_safe(f"恢复回执：{value['receipt_path']}"))
+        if value.get('resume_command'):
+            print('Codex 新会话已准备好。请在本机终端运行以下命令继续：')
+            print(_safe(value['resume_command']))
+            print('未自动调用模型；继续后使用本机 Codex 配置。')
+        warnings = value.get('warnings', []) + value.get('native_receipt', {}).get('warnings', [])
+        for warning in dict.fromkeys(warnings):
+            print(_safe(f'提示：{warning}'))
     elif args.action in ('status', 'init', 'add', 'clone', 'fork', 'switch'):
         if 'directory' in value:
             print(_safe(f"本地对话库：{value['directory']}"))

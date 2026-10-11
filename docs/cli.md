@@ -209,6 +209,24 @@ ctx log
 
 对话的独立字段变化可合并；同字段不同修改、删除/编辑及不确定的顺序冲突要求人工解决。代码独立文件的变化可三方合并；双方不同地修改同一文件会报告冲突，不进行智能代码文本拼接。合并保存两个父提交，Hub 仍按线性公开版本接收当前分支快照，本地和 Git 导出保留完整分支 DAG。当前不提供 force、rebase、reset 或对象 GC。
 
+## 从网页一步导入本机 Codex
+
+项目页的“在本机 Codex 中继续”会生成固定版本的命令，自动带上所选对话及关联消息或快照。选择 Bash / PowerShell、填写本机的新目录后，复制到运行 Codex 的终端执行。首次需安装或更新 ctx、安装 Codex CLI，并用网站账号执行 `ctx auth login`；网页和终端的登录状态各自保存。
+
+```bash
+ctx open 'https://contexthub.reflectstars.dev/?package=PACKAGE_ID&version=VERSION_ID' --to ./my-project --codex --mode context --conversation=CONVERSATION_ID
+```
+
+`open` 无需当前目录已有 ctx 工作区。它验证 Hub 版本与包内容，临时下载并恢复 `code/`、`conversations/`、`receipt.json`，成功后清理传输工作区；`conversations/` 保留完整原始包。添加 `--codex` 才创建新的 Codex 会话，终端会打印正确工作目录下的 `codex resume` 命令，执行后继续开发。
+
+- URL 必须带 `version`，或使用 `ctx open PACKAGE_ID --version VERSION_ID --to NEWDIR`。使用网页生成的完整命令；含阅读位置参数的“复制当前位置”链接不用于此入口。
+- `--message=ID` 与 `--snapshot=ID` 二选一，语义与下方 `restore` 相同。多段对话导入 Codex 时必须用 `--conversation=ID` 选择；网页会自动填写。
+- 代码快照必须存在于包内。没有代码的包应下载后用 `ctx codex import 文件.contextpack --cwd 已有项目目录` 导入，旧式 Git 检查点使用原来的 `restore --code`。
+- 网页默认明确选择 `--mode context`；不保证历史消息完整显示或再次导出。需要重建文本时间线时选择 `timeline`，目前仅支持 Codex 0.153.4。终端省略 `--mode` 时仍沿用 `timeline` 默认值。
+- `--resume` 只核验同一来源、版本、快照、对话和导入方式的既有完整结果，不覆盖修改，不重复导入。若代码已恢复但 Codex 导入失败或状态不确定，保留目录及回执并提示检查，不自动创建第二份会话。
+
+公开或私有库均须终端登录才能下载。这个命令不自动启动模型；不会复制源机器登录凭据、附件或工具执行状态。
+
 ## 代码与对话一起恢复
 
 内嵌代码需要 0.10.0 或更新的 ctx 与 Hub。push、clone、Fork、导出包和受管 Git 格式互通都会保留代码文件、代码快照及消息关联。clone 下载的是所选 ctx 版本；它携带该包已记录的代码快照，不自动克隆代码原仓库的 Git 历史。

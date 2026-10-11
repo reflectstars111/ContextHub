@@ -13,6 +13,7 @@
   <script src="/contributions.js" defer></script>
   <script src="/repository.js" defer></script>
   <script src="/code-browser.js" defer></script>
+  <script src="/codex-open.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -45,7 +46,7 @@
           <div id="inspect-result" hidden></div><div id="import-receipt" hidden></div>
         </section>
         <section id="reader-view" class="view" hidden aria-labelledby="reader-title">
-          <button class="back-button" id="reader-back">← 返回对话库</button><div class="reader-heading"><div><div class="eyebrow" id="reader-eyebrow">CONVERSATION</div><div class="repository-name"><span id="reader-owner"></span><span class="repository-slash" aria-hidden="true">/</span><h1 id="reader-title"></h1><span id="repository-visibility" class="visibility-badge"></span></div><p id="reader-description"></p><div class="metadata-row" id="reader-metadata"></div></div><div class="reader-primary-actions"><button class="button button-primary" id="download-package">下载完整对话包</button><button class="button button-danger-quiet" id="delete-package" hidden>删除</button></div></div>
+          <button class="back-button" id="reader-back">← 返回对话库</button><div class="reader-heading"><div><div class="eyebrow" id="reader-eyebrow">CONVERSATION</div><div class="repository-name"><span id="reader-owner"></span><span class="repository-slash" aria-hidden="true">/</span><h1 id="reader-title"></h1><span id="repository-visibility" class="visibility-badge"></span></div><p id="reader-description"></p><div class="metadata-row" id="reader-metadata"></div></div><div class="reader-primary-actions"><button class="button button-primary" id="repository-codex-action" disabled>在本机 Codex 中继续</button><button class="button button-secondary" id="download-package">下载完整对话包</button><button class="button button-secondary" id="repository-restore-action" disabled>恢复所选代码</button><button class="button button-danger-quiet" id="delete-package" hidden>删除</button></div></div>
           <nav class="repository-navigation" id="repository-navigation" aria-label="仓库导航">
             <a href="#conversation-section" class="repository-nav-item active" data-repository-section="conversation-section" aria-current="location"><span aria-hidden="true">▤</span> 对话</a>
             <a href="#code-browser-panel" class="repository-nav-item" data-repository-section="code-browser-panel"><span aria-hidden="true">⌘</span> 代码</a>
@@ -56,7 +57,7 @@
           <div class="repository-columns"><div class="repository-main">
           <div id="version-workspace" hidden>
             <div id="upstream-info" class="upstream-info" hidden></div>
-            <div class="version-toolbar"><div class="version-choice"><label for="version-select">版本历史</label><select id="version-select" class="text-input"></select><span id="version-position" class="pill"></span></div><div class="version-actions"><button id="copy-version-link" class="button button-small">复制此版本链接</button><button id="compare-versions" class="button button-small">比较版本</button><button id="fork-package" class="button button-secondary" hidden>Fork 到我的对话库</button><button id="open-contribution" class="button button-secondary" hidden>贡献给上游</button><button id="edit-package" class="button button-primary" hidden>编辑副本</button></div></div>
+            <div class="version-toolbar"><div class="version-choice"><label for="version-select">版本历史</label><select id="version-select" class="text-input"></select><span id="version-position" class="pill"></span></div><div class="version-actions"><button id="copy-location-link" class="button button-small">复制当前位置</button><button id="copy-version-link" class="button button-small">复制版本链接</button><button id="compare-versions" class="button button-small">比较版本</button><button id="fork-package" class="button button-secondary" hidden>Fork 到我的对话库</button><button id="open-contribution" class="button button-secondary" hidden>贡献给上游</button><button id="edit-package" class="button button-primary" hidden>编辑副本</button></div></div>
             <p id="version-description" class="version-description"></p>
             <div id="draft-recovery" class="notice" hidden>你有一份仅自己可见的服务器草稿。<button id="restore-draft" class="button button-small">恢复草稿</button></div>
 
@@ -75,7 +76,7 @@
           <div class="reader-layout" id="conversation-section" data-repository-panel><aside class="conversation-sidebar"><div class="tiny-label">对话目录</div><div id="conversation-tabs" class="conversation-tabs"></div><label class="sr-only" for="turn-search">搜索对话轮次</label><input id="turn-search" class="text-input turn-search" placeholder="搜索对话内容…" type="search"><div id="turn-directory" class="turn-directory" aria-label="按日期排列的对话轮次"></div><div class="reader-note">来源与编辑记录会随对话保留。未知或未支持的内容会在兼容性报告中注明。</div></aside><article class="conversation-content"><div class="conversation-toolbar"><h2 id="conversation-title"></h2><div class="copy-actions"><label class="sr-only" for="copy-format">导出格式</label><select id="copy-format"><option value="markdown">Markdown</option><option value="json">JSON</option></select><button class="button button-small" id="copy-conversation">复制</button><button class="button button-small" id="save-conversation">保存</button><button class="button button-small" id="save-archive" hidden>下载存档文本</button></div></div><div id="conversation-provenance"></div><div id="turn-navigation" class="turn-navigation"></div><div id="messages" class="messages"></div></article></div>
           <section id="code-browser-panel" data-repository-panel class="code-browser-panel" aria-labelledby="code-browser-title">
             <div class="code-browser-heading"><h2 id="code-browser-title">代码</h2><label for="code-snapshot-select">代码快照</label><select id="code-snapshot-select" class="text-input"></select></div>
-            <p id="code-browser-note" class="field-help"></p><div id="code-browser-summary" class="code-browser-summary"></div>
+            <div id="code-origin" class="code-origin" hidden></div><p id="code-browser-note" class="field-help"></p><div id="code-browser-summary" class="code-browser-summary"></div>
             <div class="code-browser-tabs"><button id="code-files-tab" class="button button-small" aria-pressed="true">文件</button><button id="code-diff-tab" class="button button-small" aria-pressed="false">代码变更</button></div>
             <div id="code-files-panel"><nav id="code-breadcrumb" class="code-breadcrumb" aria-label="代码目录"></nav><div id="code-tree" class="code-tree"></div><div id="code-file" class="code-file" aria-live="polite"></div></div>
             <div id="code-diff-panel" hidden aria-live="polite"></div>
@@ -91,8 +92,8 @@
           <aside class="repository-about" aria-label="仓库信息">
             <section class="about-section"><h2>About</h2><p id="repository-about-description"></p><div id="repository-about-platforms" class="platform-badges"></div><dl id="repository-about-facts"></dl></section>
             <section id="code-checkpoint-panel" class="about-section" tabindex="-1"><h2>Git 提交关联</h2><div id="code-checkpoint-content"></div></section>
-            <section class="about-section"><h2>同步恢复</h2><p id="repository-restore-description">在本机用 ctx 恢复代码与对话。</p><a class="text-button repository-help-link" href="/cli#code-checkpoints">查看检查点与恢复说明 →</a><details class="checkpoint-guide"><summary>终端操作示例</summary><p id="repository-capture-guide">在项目目录采集当前代码与对话：</p><pre id="repository-capture-command">ctx add .
-ctx commit -m "记录当前实现"</pre><p id="repository-restore-guide">先登录并克隆页面所选版本，再恢复到 NEWDIR 新目录：</p><pre id="checkpoint-restore-command">ctx restore REF --code /path/to/code --to NEWDIR</pre><p>命令创建恢复副本。加上 <code>--codex</code> 可继续导入本机 Codex；多段对话时用 <code>--conversation ID</code> 选择一段。导入结果以本地回执为准。</p></details></section>
+            <section class="about-section"><h2>同步恢复</h2><p id="repository-restore-selection" class="restore-selection" aria-live="polite"></p><p id="repository-restore-description">在本机用 ctx 恢复代码与对话。</p><a class="text-button repository-help-link" href="/cli#code-checkpoints">查看检查点与恢复说明 →</a><details class="checkpoint-guide" id="repository-terminal-guide"><summary>在终端使用此版本</summary><p>先在终端登录本站。以下为 Bash 命令，请将 conversation-workspace 和 NEWDIR 换成尚不存在的新目录。</p><p>克隆页面所选的固定版本：</p><pre id="repository-clone-command"></pre><button id="copy-clone-command" class="button button-small" disabled>复制克隆命令</button><p id="repository-capture-guide">在项目目录采集当前代码与对话：</p><pre id="repository-capture-command">ctx add .
+ctx commit -m "记录当前实现"</pre><p id="repository-restore-guide">先登录并克隆页面所选版本，再恢复到 NEWDIR 新目录：</p><pre id="checkpoint-restore-command"></pre><button id="copy-restore-command" class="button button-small" disabled>复制恢复命令</button><p>命令创建恢复副本。加上 <code>--codex</code> 可继续导入本机 Codex；多段对话时用 <code>--conversation ID</code> 选择一段。导入结果以本地回执为准。</p></details></section>
           </aside></div>
         </section>
         <section id="contribution-view" class="view" hidden aria-labelledby="contribution-title">
@@ -110,6 +111,35 @@ ctx commit -m "记录当前实现"</pre><p id="repository-restore-guide">先登�
       <footer class="workspace-footer"><span>ContextHub</span><span id="boundary-note">正在读取服务配置…</span></footer>
     </div>
   </div>
+  <dialog id="codex-open-dialog" aria-labelledby="codex-open-title">
+    <div class="dialog-body">
+      <button type="button" class="dialog-close" data-close="codex-open-dialog" aria-label="关闭">×</button>
+      <h2 id="codex-open-title">在本机 Codex 中继续</h2>
+      <p class="subtle">复制一条命令，在运行 Codex 的电脑或远程服务器终端执行。</p>
+      <p id="codex-open-selection" class="restore-selection"></p>
+      <p id="codex-open-scope" class="field-help"></p>
+      <label class="field-label" for="codex-open-conversation">导入哪段对话</label>
+      <select id="codex-open-conversation" class="text-input"></select>
+      <label class="field-label" for="codex-open-target">本机目标目录</label>
+      <input id="codex-open-target" class="text-input" value="./contexthub-project" maxlength="2048" autocomplete="off" spellcheck="false" aria-describedby="codex-open-target-help">
+      <p class="field-help" id="codex-open-target-help">请使用新目录，代码将放在 code/，完整对话包保存在 conversations/。</p>
+      <div class="codex-open-options">
+        <div><label class="field-label" for="codex-open-shell">本机终端</label><select id="codex-open-shell" class="text-input"><option value="bash">Linux / macOS / WSL · Bash</option><option value="powershell">Windows · PowerShell</option></select></div>
+        <div><label class="field-label" for="codex-open-mode">对话导入方式</label><select id="codex-open-mode" class="text-input"><option value="context">上下文注入（兼容模式）</option><option value="timeline">重建文本时间线</option></select></div>
+      </div>
+      <p class="field-help" id="codex-open-mode-help"></p>
+      <pre id="codex-open-command" class="terminal-command"></pre>
+      <p id="codex-open-error" class="inline-error" role="alert" hidden></p>
+      <button id="copy-codex-open-command" class="button button-primary full-width">复制导入命令</button>
+      <p id="codex-open-copy-status" class="field-help" role="status"></p>
+      <p class="field-help">执行成功后，终端会显示 <code>codex resume</code> 命令，运行它即可继续。导入不会自动调用模型。</p>
+      <details class="codex-open-setup"><summary>首次使用：安装与登录</summary>
+        <p class="field-help">先<a id="codex-open-install" href="/cli#install" target="_blank" rel="noopener">安装或更新 ctx</a>，并确认本机已安装 Codex CLI。已有旧版 ctx 也需更新，运行 <code>ctx open --help</code> 可检查。</p>
+        <p class="field-help">下载公开或私有项目均需终端登录。使用网站账户执行以下命令；未注册时先在网站创建账户。网页登录与终端登录分别保存。</p>
+        <pre id="codex-open-login-command" class="terminal-command"></pre>
+      </details>
+    </div>
+  </dialog>
   <dialog id="contribution-dialog" aria-labelledby="contribution-dialog-title"><form id="contribution-form" class="dialog-body"><button type="button" class="dialog-close" data-close="contribution-dialog" aria-label="关闭">×</button><span class="eyebrow">BRING YOUR CONTEXT BACK</span><h2 id="contribution-dialog-title">贡献给上游</h2><p id="contribution-proposal-route" class="subtle"></p><label class="field-label" for="contribution-title-input">标题</label><input id="contribution-title-input" class="text-input" maxlength="200" required placeholder="一句话说明这次改进"><label class="field-label" for="contribution-description-input">说明</label><textarea id="contribution-description-input" class="text-input" rows="5" maxlength="10000" placeholder="解决了什么问题，有哪些内容需要上游特别关注？"></textarea><p class="field-help">提案使用当前选中的固定版本。后续编辑 Fork 不会自动改变这份提案；上游查看合并候选后才能发布。</p><p id="contribution-form-error" class="inline-error" role="alert" hidden></p><button id="contribution-submit" type="submit" class="button button-primary full-width">提交贡献请求</button></form></dialog>
   <dialog id="fork-dialog" aria-labelledby="fork-title"><form id="fork-form" class="dialog-body"><button type="button" class="dialog-close" data-close="fork-dialog" aria-label="关闭">×</button><span class="eyebrow">CONTINUE THE CONVERSATION</span><h2 id="fork-title">Fork 到我的对话库</h2><p id="fork-description" class="subtle"></p><fieldset class="visibility-options"><legend>新对话库的可见性</legend><label><input type="radio" name="fork-visibility" value="private" checked><span><strong>仅自己</strong><small>创建独立的私有副本</small></span></label><label id="fork-public-option"><input type="radio" name="fork-visibility" value="public"><span><strong>公开分享</strong><small>任何人可阅读，登录后可下载新副本</small></span></label></fieldset><p id="fork-boundary" class="field-help">Fork 保留所选版本的来源；后续编辑只产生你自己的新版本。</p><p id="fork-error" class="inline-error" role="alert" hidden></p><button id="fork-submit" type="submit" class="button button-primary full-width">创建私有 Fork</button></form></dialog>
   <dialog id="auth-dialog" aria-labelledby="auth-title"><form id="auth-form" class="dialog-body"><button type="button" class="dialog-close" data-close="auth-dialog" aria-label="关闭">×</button><span class="eyebrow">YOUR CONTEXT, TOGETHER</span><h2 id="auth-title">欢迎回来</h2><p id="auth-description" class="subtle">登录后上传、管理你的对话包。</p><div class="segmented-control"><button type="button" id="login-tab" class="active">登录</button><button type="button" id="register-tab">注册</button></div><label class="field-label" for="username">用户名</label><input id="username" class="text-input" name="username" autocomplete="username" required minlength="3" maxlength="64"><label class="field-label" for="password">密码</label><input id="password" class="text-input" name="password" type="password" autocomplete="current-password" required><p id="auth-error" class="inline-error" role="alert" hidden></p><button type="submit" id="auth-submit" class="button button-primary full-width">登录</button></form></dialog>

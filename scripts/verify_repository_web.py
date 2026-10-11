@@ -2,6 +2,7 @@
 """Repository UI and code checkpoint acceptance against a temporary real Hub."""
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 import sys
 import tempfile
 
@@ -49,7 +50,7 @@ def main():
             expect(panel).to_contain_text('不代表 GitHub 认证')
             expect(page.locator('#checkpoint-restore-command')).to_contain_text('version=' + first)
             page.locator('[data-repository-section="code-browser-panel"]').click()
-            assert page.url == first_url, 'Repository section navigation dropped the pinned version'
+            assert all(parse_qs(urlsplit(page.url).query)[key] == parse_qs(urlsplit(first_url).query)[key] for key in ('package', 'version')), 'Repository section navigation dropped the pinned version'
             page.locator('[data-repository-section="conversation-section"]').click()
             page.evaluate('window.scrollTo(0, 0)')
             page.screenshot(path=str(artifacts / 'repository-desktop.png'), full_page=True)

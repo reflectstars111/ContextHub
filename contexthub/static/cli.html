@@ -68,6 +68,14 @@ cd my-copy
 ctx pull</code></pre>
       <p class="note">add . 刷新当前分支的已跟踪对话，采集代码后一起暂存；重复采集不生成空变更。人工修改会阻止覆盖，可用 --no-refresh 跳过对话刷新。--no-code 仅更新对话并保留旧代码；--code 路径可指定 Git 工作区。没有 Git 仓库时仅更新对话并提示。commit 只保存暂存区，push 不额外读取 Codex。本机来源绑定不进入上传包或 clone。pull 要求工作区干净；代码按文件三方比较，同文件不同修改会冲突，不自动拼接文本；对话保留字段级合并。支持 branch、switch、merge；clone 取得所选快照，网站保留远程版本历史。</p>
     </section>
+    <section id="open-codex"><h2>从网页带到本机 Codex</h2><p>在项目页点击“在本机 Codex 中继续”，选择终端类型、目标新目录和导入方式，复制生成的完整命令。到运行 Codex 的电脑或远程服务器终端执行即可，无需手动下载、clone 或切换工作目录。</p>
+<pre><code>ctx auth login --username 你的用户名
+# 网页自动填写真实版本、对话和代码选择；大写 ID 是占位符
+ctx open 'https://contexthub.reflectstars.dev/?package=PACKAGE_ID&amp;version=VERSION_ID' --to ./my-project --codex --mode context --conversation=CONVERSATION_ID</code></pre>
+      <p class="note">需更新 ctx 并安装 Codex CLI；运行 ctx open --help 检查是否支持。网页登录和终端登录分别保存。命令恢复 code/、conversations/ 和 receipt.json，创建新会话后打印 codex resume 命令，运行它即可继续。</p>
+      <p class="note">网页默认选择 context 上下文注入，不保证完整显示或再次导出历史消息。timeline 重建文本时间线目前仅支持 Codex 0.153.4。从消息进入时只导入截至该消息的正文，完整包仍保留。包必须携带代码，目标必须是新目录；无代码包可用 ctx codex import 导入已有项目。</p>
+      <p class="note">原生导入失败时保留已恢复的文件与回执；检查 receipt.json，不要换目录盲目重试。--resume 仅核验同一次完整恢复，不自动重复创建会话。</p>
+    </section>
     <section id="code-checkpoints"><h2>代码与对话一起恢复</h2><p>默认保存的代码包含工作区当前文件。上传、clone、Fork 和导出都会携带它们；在另一台机器无需原 Git 仓库即可恢复。</p>
 <pre><code>ctx add .
 ctx diff --staged

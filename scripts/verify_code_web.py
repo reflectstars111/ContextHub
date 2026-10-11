@@ -5,6 +5,7 @@ All conversations, accounts and code are synthetic; storage is temporary.
 """
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 import sys
 import tempfile
 
@@ -93,7 +94,7 @@ def main():
             page.locator('#code-snapshot-select').select_option(first_code['head'])
             page.locator('#code-tree [data-path="app.py"]').click()
             expect(page.locator('#code-file-content, .code-file-content')).to_have_text('print("first")\n')
-            assert page.url == pinned
+            assert all(parse_qs(urlsplit(page.url).query)[key] == parse_qs(urlsplit(pinned).query)[key] for key in ('package', 'version')), 'Code browsing changed the pinned package/version'
             page.locator('#code-snapshot-select').select_option(code['head'])
             page.locator('[data-repository-section="conversation-section"]').click()
             page.locator('#turn-search').fill('第1轮')

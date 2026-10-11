@@ -17,6 +17,68 @@ function checkpointLink(url, label, className = "") {
   return link;
 }
 function shellArgument(value) { return "'" + String(value).replace(/'/g, "'\\''") + "'"; }
+function repositoryRestorePlan(data = state.reader) {
+  const unavailable = (reason) => ({ command: "", description: reason, label: "暂不可恢复" });
+  if (!data || data.kind !== "hub" || !data.id || !data.version || !data.version.id) {
+    return unavailable(data && data.kind === "draft" ? "草稿尚未发布。请先保存新版本，再生成对应的恢复命令。" : "请先将对话与代码保存到 Hub，再从固定版本生成恢复命令。");
+  }
+  const version = `v${data.version.number}`;
+  const prefix = `ctx clone ${shellArgument(versionURL(data.id, data.version.id).href)} conversation-workspace &&\ncd conversation-workspace &&\n`;
+  const code = data.code;
+  if (!code || !(code.snapshots || []).length) {
+    if (!data.code_checkpoint) return unavailable("此版本未记录可恢复的代码。可以克隆对话，在本机准备代码后继续开发。");
+    if (data.code_checkpoint_status !== "matched") return unavailable("Git 检查点与当前对话不匹配。请重新关联后再恢复，或选择已有匹配检查点的历史版本。");
+    return { command: prefix + "ctx restore HEAD --code /path/to/code --to NEWDIR", label: `${version} · Git 检查点 ${data.code_checkpoint.commit.slice(0, 12)}`, description: "旧式 Git 检查点需本机拥有对应代码提交；请替换代码路径。" };
+  }
+  const snapshots = code.snapshots || [], bindings = code.bindings || [];
+  const section = $("reader-view").dataset.repositoryTab;
+  let snapshot = snapshots.find((item) => item.id === code.head), binding = null;
+  if (section === "code-browser-panel") {
+    snapshot = codeSnapshot();
+    const origin = codeBrowser.origin;
+    if (origin && snapshot) binding = bindings.find((item) => item.conversation_id === origin.conversation_id && item.message_id === origin.message_id && item.snapshot_id === snapshot.id);
+  } else if (section === "conversation-section") {
+    const conversation = currentConversation();
+    const turn = conversation && conversationTurns(conversation).find((item) => item.key === state.turnKey);
+    const messageIds = new Set(turn ? turn.entries.map(({ message }) => message.id) : []);
+    const matches = conversation ? bindings.filter((item) => item.conversation_id === conversation.id && messageIds.has(item.message_id) && snapshots.some((snapshot) => snapshot.id === item.snapshot_id)) : [];
+    if (!matches.length) return unavailable("本轮未记录代码关联。可切换到“代码”页选择已保存快照；不会为旧消息推测代码历史。");
+    if (new Set(matches.map((item) => item.snapshot_id)).size > 1) return unavailable("本轮对应多个代码快照。请点击具体消息下的“采集时的代码”，再恢复所选快照。");
+    const last = [...turn.entries].reverse().find(({ message }) => matches.some((item) => item.message_id === message.id));
+    binding = matches.find((item) => item.message_id === last.message.id);
+    snapshot = snapshots.find((item) => item.id === binding.snapshot_id);
+  }
+  if (!snapshot) return unavailable("当前未选择有效代码快照，请在“代码”页选择一个已保存的快照。");
+  const conversation = binding && (data.conversations || []).find((item) => item.id === binding.conversation_id);
+  const turn = conversation && conversationTurns(conversation).find((item) => item.entries.some(({ message }) => message.id === binding.message_id));
+  const selection = binding ? `--message=${shellArgument(binding.message_id)} --conversation=${shellArgument(binding.conversation_id)}` : `--snapshot ${shellArgument(snapshot.id)}`;
+  const label = binding && conversation && turn ? `${version} · ${conversation.title || "未命名对话"} · 第 ${turn.number} 轮 · ${snapshot.id.slice(0, 12)}` : `${version} · 代码快照 ${snapshot.id.slice(0, 12)}`;
+  return { command: prefix + `ctx restore HEAD ${selection} --to NEWDIR`, label, snapshot: snapshot.id,
+    message: binding ? binding.message_id : null, conversation: binding ? binding.conversation_id : null,
+    description: "恢复所选快照的完整代码与对话包。代码关联表示采集时的状态；原工作目录保持不变。" };
+}
+function renderRepositoryRestore() {
+  if (!$("checkpoint-restore-command")) return;
+  const data = state.reader;
+  const published = Boolean(data && data.kind === "hub" && data.id && data.version && data.version.id);
+  const plan = repositoryRestorePlan(data);
+  if (typeof renderCodexOpenState === "function") renderCodexOpenState(plan);
+  $("repository-restore-action").hidden = Boolean(data && data.kind === "local");
+  $("repository-restore-action").disabled = !plan.command;
+  $("repository-restore-action").title = plan.description;
+  $("copy-restore-command").disabled = !plan.command;
+  $("copy-clone-command").disabled = !published;
+  $("copy-location-link").disabled = !published;
+  $("repository-restore-selection").textContent = plan.label;
+  $("repository-restore-description").textContent = plan.description;
+  $("checkpoint-restore-command").textContent = plan.command;
+  $("checkpoint-restore-command").hidden = !plan.command;
+  $("repository-clone-command").textContent = published ? `ctx clone ${shellArgument(versionURL(data.id, data.version.id).href)} conversation-workspace` : "请先保存为正式版本。";
+  $("repository-restore-guide").textContent = plan.command ? "先登录并克隆上述固定版本，再恢复所选代码。复制以下完整命令：" : plan.description;
+  const embedded = data && data.code;
+  $("repository-capture-guide").textContent = embedded ? "在项目目录采集当前代码与对话：" : "在本机 Git 项目目录保存对话与代码：";
+  $("repository-capture-command").textContent = 'ctx add .\nctx commit -m "记录当前实现"';
+}
 function renderRepository(data) {
   if (typeof renderCodeRepository === "function") renderCodeRepository(data);
   const owner = typeof data.author === "object" ? data.author && data.author.username : data.author;
@@ -73,18 +135,9 @@ function renderRepository(data) {
     panel.append(facts);
     panel.append(node("p", "checkpoint-explanation", status === "matched" ? "关联记录与当前对话内容匹配；恢复时还会在本机核验代码对象。此状态不代表 GitHub 认证。" : draft ? "草稿尚未发布。发布后重新计算对话摘要，编辑后的内容可能需要新检查点。" : "当前对话与记录时的内容不一致。请创建新的代码检查点后再同步恢复。"));
   }
-  const guide = $("checkpoint-restore-command");
-  if (guide) {
-    const pinned = data.kind === "hub" && data.id && data.version && data.version.id;
-    const restore = data.code ? "ctx restore HEAD --to NEWDIR" : "ctx restore HEAD --code /path/to/code --to NEWDIR";
-    guide.textContent = pinned ? `ctx clone ${shellArgument(versionURL(data.id, data.version.id).href)} conversation-workspace\ncd conversation-workspace\n${restore}` : restore.replace("HEAD", "REF");
-    $("repository-restore-description").textContent = data.code ? "此版本已带代码文件，无需原 Git 仓库即可恢复。" : "旧式 Git 检查点需本机拥有对应代码提交。";
-    $("repository-capture-guide").textContent = data.code ? "在项目目录采集当前代码与对话：" : "旧式检查点要求对话已保存、代码 Git 工作区干净：";
-    $("repository-capture-command").textContent = data.code ? 'ctx add .\nctx commit -m "记录当前实现"' : 'ctx checkpoint --code /path/to/code -m "记录当前实现"';
-    $("repository-restore-guide").textContent = data.code ? "先登录并克隆页面所选版本，再恢复到 NEWDIR 新目录：" : "先取得对应代码 Git 仓库，再克隆所选对话版本。请替换代码路径与 NEWDIR：";
-  }
+  renderRepositoryRestore();
 }
-function setRepositorySection(id, { focus = false, guard = false } = {}) {
+function setRepositorySection(id, { focus = false, guard = false, history = false } = {}) {
   const target = $(id);
   if (!target || target.hidden || !target.hasAttribute("data-repository-panel")) return false;
   if (guard && !requireSavedEditor()) return false;
@@ -103,6 +156,8 @@ function setRepositorySection(id, { focus = false, guard = false } = {}) {
   collaboration.hidden = !["package-contributions-panel", "library-settings"].includes(id);
   if (target.tagName === "DETAILS") target.open = true;
   if (focus) { target.setAttribute("tabindex", "-1"); target.focus({ preventScroll: true }); }
+  renderRepositoryRestore();
+  if (history && typeof updateReaderLocation === "function") updateReaderLocation();
   return true;
 }
 function renderRepositoryHistory(data, versions) {
@@ -118,11 +173,34 @@ function renderRepositoryHistory(data, versions) {
   if (!versions.length) list.append(node("p", "field-help", "尚无已保存版本。"));
 }
 document.addEventListener("DOMContentLoaded", () => {
+  $("copy-location-link").addEventListener("click", () => perform(async () => {
+    const url = typeof readerLocationURL === "function" && readerLocationURL();
+    if (!url) return;
+    await copyText(url.href);
+    showStatus("当前位置链接已复制，包含固定版本与所选轮次或文件。私有库仍仅拥有者可见。");
+  }));
+  $("repository-restore-action").addEventListener("click", () => {
+    if (!repositoryRestorePlan().command || !requireSavedEditor()) return;
+    const guide = $("repository-terminal-guide"); guide.open = true;
+    guide.scrollIntoView({ block: "nearest" });
+    $("copy-restore-command").focus({ preventScroll: true });
+  });
+  $("copy-restore-command").addEventListener("click", () => perform(async () => {
+    const plan = repositoryRestorePlan();
+    if (!plan.command) return;
+    await copyText(plan.command);
+    showStatus("恢复命令已复制；请替换两个新目录名称，再在已登录的本机终端执行。");
+  }));
+  $("copy-clone-command").addEventListener("click", () => perform(async () => {
+    if ($("copy-clone-command").disabled) return;
+    await copyText($("repository-clone-command").textContent);
+    showStatus("固定版本的克隆命令已复制；下载前需在本机终端登录本站。");
+  }));
   $("repository-navigation").addEventListener("click", (event) => {
     const tab = event.target.closest("[data-repository-section]");
     if (!tab) return;
     event.preventDefault();
-    setRepositorySection(tab.dataset.repositorySection, { focus: true, guard: true });
+    setRepositorySection(tab.dataset.repositorySection, { focus: true, guard: true, history: true });
   });
   $("repository-navigation").addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -130,6 +208,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const current = tabs.indexOf(event.target); if (current < 0) return;
     event.preventDefault();
     const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-    if (setRepositorySection(tabs[next].dataset.repositorySection, { guard: true })) tabs[next].focus();
+    if (setRepositorySection(tabs[next].dataset.repositorySection, { guard: true, history: true })) tabs[next].focus();
   });
 });
